@@ -1,4 +1,5 @@
     source_name: OpenSky Network - live ADS-B aircraft state vectors
+
 provider: The OpenSky Network (non-profit research association)
 url: https://openskynetwork.github.io/opensky-api/rest.html
 access_method: REST API (GET /states/all); anonymous access possible, account credentials recommended (OAuth2 client credentials or username/password, see .env.example)
@@ -10,14 +11,14 @@ record_meaning: one row = the latest known state of one aircraft (identified by 
 join_key: time (UTC) + position (latitude/longitude) -> joins to the Open-Meteo hourly record of the nearest location/hour
 first_retrieved: TODO - fill in with the UTC time of the first successful run (e.g. 2026-10-10T09:12:44Z)
 known_issues:
-  - Each request is a single snapshot, so a continuous picture needs repeated runs (scheduling is M5).
-  - Anonymous requests have strict rate limits (HTTP 429 is possible); credentials give higher limits.
-  - Coverage depends on community-operated receivers; gaps and missing aircraft are possible, especially at low altitude and over water.
-  - Some fields can be null (e.g. position or altitude when not reported).
-  - TODO - add anything noticed in the first real run.
 
+- Each request is a single snapshot, so a continuous picture needs repeated runs (scheduling is M5).
+- Anonymous requests have strict rate limits (HTTP 429 is possible); credentials give higher limits.
+- Coverage depends on community-operated receivers; gaps and missing aircraft are possible, especially at low altitude and over water.
+- Some fields can be null (e.g. position or altitude when not reported).
+- TODO - add anything noticed in the first real run.
 
-  source_name: Open-Meteo - hourly weather forecast API
+source_name: Open-Meteo - hourly weather forecast API
 provider: Open-Meteo.com
 url: https://open-meteo.com/en/docs
 access_method: REST API (GET /v1/forecast), no API key required
@@ -29,8 +30,20 @@ record_meaning: one row = one weather variable value at one location for one hou
 join_key: location (latitude/longitude) + hourly timestamp (UTC) -> joins to OpenSky state vectors (nearest location, same hour)
 first_retrieved: TODO - fill in with the UTC time of the first successful run
 known_issues:
-  - Values are model output (forecast/reanalysis blend), not station observations.
-  - Coordinates are snapped to the model grid; the returned latitude/longitude can differ slightly from the request.
-  - Some variables can be null for certain hours or locations.
-  - Open-Meteo is a forecast API: past values for the window may be updated between runs.
-  - TODO - add anything noticed in the first real run.
+
+- Values are model output (forecast/reanalysis blend), not station observations.
+- Coordinates are snapped to the model grid; the returned latitude/longitude can differ slightly from the request.
+- Some variables can be null for certain hours or locations.
+- Open-Meteo is a forecast API: past values for the window may be updated between runs.
+  When we first run the code to call the API we got this error
+  ===== RUN SUMMARY =====
+  opensky AUTH FAILED Authentication failed (HTTP 401) for https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token. Check the credentials in your .env file. Not retrying.
+  openmeteo SKIPPED run aborted after authentication failure
+  0/2 sources fetched successfully.
+  Run is NOT healthy: see failures above.
+  PS C:\Users\ACER\flight-delay-weather-analysis> python src/ingest.py
+  [14:52:50Z] Ingestion run started (UTC 2026-10-09T14:52:50Z)
+  [14:52:50Z] Fetching opensky ...
+
+because we did some mistake in the .env file but after correcting our mistake we got the data we wanted.
+For openmeteo we didnt get any error and got the data succesfully.

@@ -8,5 +8,6 @@ venv/
 __pycache__/
 *.pyc
  
-# Raw data: uncomment if a source's terms forbid redistribution (see docs/sources.md)
-# data/raw/
+# We keep the data in local and dont push it to github
+data/raw/*/*
+!data/raw/*/.gitkeep
