@@ -11,3 +11,4 @@ __pycache__/
 # We keep the data in local and dont push it to github
 data/raw/*/*
 !data/raw/*/.gitkeep
+data/*.db
