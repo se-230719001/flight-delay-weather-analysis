@@ -1,0 +1,6 @@
+location_index,iata,airport_name,decided_by,decided_at,note
+0,IST,Istanbul Airport,TODO-team-member,2026-10-20,"Index = position in the OPENMETEO_LOCATIONS request (default order IST,SAW,ESB,ADB,AYT, see ingest.py); returned grid point is 2.6 km from the requested airport coordinates 41.2753,28.7519"
+1,SAW,Sabiha Gökçen International Airport,TODO-team-member,2026-10-20,"Index = position in the OPENMETEO_LOCATIONS request (default order IST,SAW,ESB,ADB,AYT, see ingest.py); returned grid point is 5.0 km from the requested airport coordinates 40.8986,29.3092"
+2,ESB,Ankara Esenboğa Airport,TODO-team-member,2026-10-20,"Index = position in the OPENMETEO_LOCATIONS request (default order IST,SAW,ESB,ADB,AYT, see ingest.py); returned grid point is 3.7 km from the requested airport coordinates 40.1281,32.9951"
+3,ADB,İzmir Adnan Menderes Airport,TODO-team-member,2026-10-20,"Index = position in the OPENMETEO_LOCATIONS request (default order IST,SAW,ESB,ADB,AYT, see ingest.py); returned grid point is 2.5 km from the requested airport coordinates 38.2924,27.157"
+4,AYT,Antalya Airport,TODO-team-member,2026-10-20,"Index = position in the OPENMETEO_LOCATIONS request (default order IST,SAW,ESB,ADB,AYT, see ingest.py); returned grid point is 3.6 km from the requested airport coordinates 36.8987,30.8005"
