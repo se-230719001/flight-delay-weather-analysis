@@ -13,8 +13,8 @@
 **update_cadence:** live (state vectors refresh every few seconds to ~10 s; each request returns one snapshot)  
 **coverage:** Snapshot at retrieval time, restricted to the bounding box set in OPENSKY_BBOX (default: lat 36-42, lon 26-45, i.e. Turkey and surroundings). Historical data requires separate access and is not part of M1.  
 **record_meaning:** one row = the latest known state of one aircraft (identified by icao24) at one point in time (position, altitude, velocity, heading, etc.)  
-**join_key:** time (UTC) + position (latitude/longitude) -> joins to the Open-Meteo hourly record of the nearest location/hour  
-**first_retrieved:** 2026-10-09T14:53:48Z  
+**join_key:** time (UTC) + position (latitude/longitude) -> joins to the Open-Meteo hourly record of the nearest location/hour (in M2 the analytical query uses a 0.25 degree box around each airport)  
+**first_retrieved:** 2026-10-09T14:53:47Z  
 **known_issues:**  
 - Each request is a single snapshot, so a continuous picture needs repeated runs (scheduling is M5).
 - Anonymous requests have strict rate limits (HTTP 429 is possible); credentials give higher limits.
@@ -22,6 +22,11 @@
 - Some fields can be null (e.g. position or altitude when not reported).
 - First run failed with AUTH FAILED (HTTP 401) for OpenSky because the credentials in .env were not in the expected format (JSON pasted instead of plain OPENSKY_CLIENT_ID= / OPENSKY_CLIENT_SECRET= values). Fixed by putting each value on its own line without quotes or braces. Because the auth error aborts the whole run, Open-Meteo was skipped until this was fixed.
 - First successful run (2026-10-09): OpenSky response ~28 KB, Open-Meteo response ~12 KB, one file per source in data/raw/<source>/.
+- (M2) Some fields are null, mostly for aircraft on the ground: altitude, velocity, vertical rate and squawk. We load null as NULL (not reported), never as zero.
+- (M2) The same state can appear in several snapshots when an aircraft has not sent a new update: on the landed files, 12 of 802 states were repeats of an earlier `(icao24, time_position)`, and 3 of those had a different `baro_altitude`. The loader deduplicates by this key and keeps the most recently retrieved version.
+- (M2) `callsign` is not stable per aircraft (28 of 470 aircraft changed callsign) and is stored padded with trailing spaces, exactly as received. `origin_country` never changed for an `icao24`.
+- (M2) Each state vector has 17 fields in our responses (the optional `category` field is not returned), and the response is an array, not an object, so field meaning depends on position.
+- (M2) A state with a missing `time_position` or `icao24` cannot be keyed; the loader sends it to the `quarantine` table. None have appeared so far.
 
 ---
 
@@ -44,6 +49,9 @@
 - Coordinates are snapped to the model grid; the returned latitude/longitude can differ slightly from the request.
 - Some variables can be null for certain hours or locations.
 - Open-Meteo is a forecast API: past values for the window may be updated between runs.
+- (M2) The first location in the response has no `location_id` (it is implicitly 0), so locations are identified by their position in the request (0..4); changing the order of `OPENMETEO_LOCATIONS` would mix up the history. Airport names are not in the response.
+- (M2) Hourly `time` values (e.g. `2026-10-19T00:00`) carry no timezone marker; they are UTC because the request sets `timezone=UTC`. The loader stores them as `2026-10-19T00:00Z`.
+- (M2) With `forecast_days=1`, hours after the retrieval time are forecasts, not observations. Repeated fetches on the same day returned identical values; a later run can overwrite a forecast hour, and the latest retrieval wins. Separating forecast from observed values is left for M3.
 - When we first run the code to call the API we got this error:
   ```text
   ===== RUN SUMMARY =====
@@ -56,3 +64,4 @@
   [14:52:50Z] Ingestion run started (UTC 2026-10-09T14:52:50Z)
   [14:52:50Z] Fetching opensky ...
   Because we did some mistake in the .env file but after correcting our mistake we got the data we wanted. For openmeteo we didnt get any error and got the data succesfully.
+  ```
