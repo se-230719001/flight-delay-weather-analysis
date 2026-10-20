@@ -8,6 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "data" / "flights.db"
 SCHEMA_PATH = ROOT / "sql" / "schema.sql"
+CLEAN_SCHEMA_PATH = ROOT / "sql" / "clean_schema.sql"
 
 
 def connect(path=None):
@@ -24,6 +25,12 @@ def init_schema(con):
     """Create all tables if they do not exist yet (idempotent)."""
     con.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
     con.execute("PRAGMA foreign_keys = ON")  # executescript must not leave it off
+
+
+def init_clean_schema(con):
+    """Create the M3 cleaned layer if it does not exist yet (idempotent). Needs the M2 schema first."""
+    con.executescript(CLEAN_SCHEMA_PATH.read_text(encoding="utf-8"))
+    con.execute("PRAGMA foreign_keys = ON")
 
 
 def epoch_to_iso(value):
