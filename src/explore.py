@@ -154,3 +154,90 @@ def save_fig(fig, name, caption, figure_dir=None):
     path = figure_dir / f"{name}.png"
     fig.savefig(path, dpi=150, metadata={"Software": None})
     return path
+
+
+# --- M4 phase 2: analysis helpers (pure pandas, no database access) -----------------
+
+def gust_cutoffs(weather, q, col="wind_gusts_10m", by="iata"):
+    """Per-airport gust cut-off: the q-quantile of all trusted hours of that airport.
+
+    Computed from the whole weather series, never from the traffic rows, so the definition
+    of 'windy' cannot depend on the outcome it is later compared with.
+    """
+    if not 0 < q < 1:
+        raise ValueError("q must be between 0 and 1 (exclusive)")
+    return weather.dropna(subset=[col]).groupby(by)[col].quantile(q)
+
+
+def join_traffic_weather(traffic, weather):
+    """LEFT-join the traffic grid to weather on (iata, hour_utc == observed_at).
+
+    Every grid row survives exactly once: an hour without weather gets has_weather = False and
+    gust_usable = 0 instead of disappearing. Raises ValueError if the weather frame is not
+    unique per (iata, observed_at) (that would multiply grid rows) or if a column name other
+    than iata exists on both sides (pandas would silently rename them with _x / _y).
+    """
+    key = ["iata", "observed_at"]
+    clash = (set(traffic.columns) & set(weather.columns)) - {"iata"}
+    if clash:
+        raise ValueError(f"columns exist on both sides, rename or drop them first: {sorted(clash)}")
+    if weather.duplicated(key).any():
+        raise ValueError("weather must have one row per (iata, observed_at)")
+    merged = traffic.merge(weather, how="left", left_on=["iata", "hour_utc"],
+                           right_on=key, validate="many_to_one")
+    if len(merged) != len(traffic):
+        raise ValueError("join changed the number of traffic rows")
+    merged["has_weather"] = merged["observed_at"].notna()
+    merged["gust_usable"] = merged["gust_usable"].fillna(0).astype(int)
+    return merged
+
+
+def add_airport_anomaly(df, cols, by="iata", suffix="_anom"):
+    """Add <col><suffix> = value minus the mean of that airport (NaN stays NaN).
+
+    Airports differ by a factor of ten in traffic, so raw counts would compare airports,
+    not weather. The mean is taken over every row of df, so call this BEFORE any
+    filtering on weather.
+    """
+    out = df.copy()
+    for c in cols:
+        out[c + suffix] = out[c] - out.groupby(by)[c].transform("mean")
+    return out
+
+
+def split_by_threshold(df, col, cutoff, by="iata", labels=("calm", "windy")):
+    """Add a two-label `group` column: labels[1] when col >= cutoff, else labels[0].
+
+    cutoff is a number or a Series indexed by the values of `by` (per-airport cut-offs).
+    Rows where col or the cut-off is missing get no label (NaN), so they can be dropped
+    explicitly instead of silently counting as calm.
+    """
+    out = df.copy()
+    if isinstance(cutoff, pd.Series):
+        thr = out[by].map(cutoff)
+    else:
+        thr = pd.Series(float(cutoff), index=out.index)
+    missing = out[col].isna() | thr.isna()
+    group = pd.Series(np.where(out[col] >= thr, labels[1], labels[0]), index=out.index)
+    out["group"] = group.where(~missing)
+    return out
+
+
+def format_diff(result, min_units=8):
+    """One readable line for a bootstrap_diff result, with the two warnings that matter."""
+    diff, lo, hi, n = result
+    if np.isnan(lo):
+        return f"difference {diff:+.2f}, interval unavailable (n = {n} days)"
+    text = f"difference {diff:+.2f}, 95% interval [{lo:+.2f}, {hi:+.2f}] (n = {n} days)"
+    if lo <= 0 <= hi:
+        text += "; interval includes 0"
+    if n < min_units:
+        text += f"; fewer than {min_units} days, exploratory only"
+    return text
+
+
+def assert_unchanged(before, after):
+    """Raise AssertionError naming every table whose fingerprint differs."""
+    changed = sorted(t for t in set(before) | set(after) if before.get(t) != after.get(t))
+    if changed:
+        raise AssertionError(f"database changed during exploration: {', '.join(changed)}")
