@@ -110,11 +110,22 @@ Follow the steps below to set up the environment, run the ingestion pipeline, an
 
    (or open `data/flights.db` in any SQLite client and run the file; SQLite 3.37+ is required for `STRICT` tables.)
 
+10. **Build the cleaned layer and validate it** (M3; reads only the database, never the raw files)
+
+    ```bash
+    python src/clean.py       # builds aircraft_state_clean, weather_hourly_clean, location_airport
+    python src/validate.py    # PASS / WARN / STOP checks; exits non-zero if any STOP fails
+    ```
+
+    The two commands can be run in any number; the cleaned layer is rebuilt identically each time. To prove that each STOP check can fail: `python src/validate.py --selftest`. If you change `sql/clean_schema.sql` or `src/clean_config.py`, delete `data/flights.db` and rebuild everything: `python src/load.py && python src/clean.py && python src/validate.py`.
+
+11. **Re-run the profile** (optional): open `notebooks/m3_profile.ipynb` and run all cells on a fresh build of the database.
+
 ## Repository Structure
 
 ```
 flight-delay-weather-analysis/
-├── README.md            # Project overview, setup, data model, and execution guide
+├── README.md            # Project overview, setup, data model, data quality, and execution guide
 ├── .gitignore           # Ignores secrets, local caches and the database file (data/*.db)
 ├── .env.example         # Template for required environment variables
 ├── requirements.txt     # Frozen list of project Python dependencies
@@ -122,18 +133,26 @@ flight-delay-weather-analysis/
 │   ├── raw/             # Landing zone for raw, untouched JSON API responses
 │   │   ├── opensky/     # Snapshots from OpenSky Network
 │   │   └── openmeteo/   # Snapshots from Open-Meteo API
-│   └── flights.db       # SQLite database built by load.py (derived, not committed)
+│   ├── mappings/        # M3: decisions stored as data (location_airport.csv)
+│   └── flights.db       # SQLite database built by load.py and clean.py (derived, not committed)
+├── notebooks/
+│   └── m3_profile.ipynb # M3: profile of the M2 tables, committed with outputs
 ├── sql/
-│   ├── schema.sql       # All tables (STRICT), keys and constraints; safe to run repeatedly
+│   ├── schema.sql       # M2: tables (STRICT), keys and constraints; safe to run repeatedly
+│   ├── clean_schema.sql # M3: cleaned tables (raw / cleaned / flag columns) and mapping table
 │   └── queries/
 │       └── 01_wind_and_nearby_traffic.sql   # Analytical query (grain stated in the file)
 ├── src/
 │   ├── ingest.py        # M1: extraction, retries, and logging (lands raw files)
 │   ├── db.py            # M2: connect() (foreign_keys = ON) and shared helpers
 │   ├── load.py          # M2: loads raw files into the schema (idempotent, atomic)
-│   └── checks.py        # M2: six checks run against a temporary copy of the database
+│   ├── checks.py        # M2: six checks run against a temporary copy of the database
+│   ├── clean.py         # M3: builds the cleaned layer from the M2 tables (idempotent, atomic)
+│   ├── clean_config.py  # M3: every threshold and constant, with its reason
+│   └── validate.py      # M3: data-quality expectations as code (PASS / WARN / STOP)
 └── docs/
-    └── sources.md       # Data source cards detailing schema, licensing, and known issues
+    ├── sources.md       # Data source cards detailing schema, licensing, and known issues
+    └── cleaning_report.md  # M3: issues register, rules, decisions, counts, limits
 ```
 
 ## Data Model
@@ -203,13 +222,13 @@ erDiagram
 
 ### Grain of every table
 
-| Table | One row means... |
-|-------|------------------|
-| `aircraft` | one aircraft, identified by its ICAO 24-bit transponder address (`icao24`). |
-| `aircraft_state` | one reported state (position, speed, altitude, ...) of one aircraft at one position time (`time_position`). |
-| `location` | one weather location (airport), identified by its position in the configured location list (`location_index`). |
-| `weather_hourly` | the weather values at one location for one hour (`observed_at`). |
-| `quarantine` | one raw record that could not be loaded, with the reason, in the file it was retrieved from. |
+| Table            | One row means...                                                                                               |
+| ---------------- | -------------------------------------------------------------------------------------------------------------- |
+| `aircraft`       | one aircraft, identified by its ICAO 24-bit transponder address (`icao24`).                                    |
+| `aircraft_state` | one reported state (position, speed, altitude, ...) of one aircraft at one position time (`time_position`).    |
+| `location`       | one weather location (airport), identified by its position in the configured location list (`location_index`). |
+| `weather_hourly` | the weather values at one location for one hour (`observed_at`).                                               |
+| `quarantine`     | one raw record that could not be loaded, with the reason, in the file it was retrieved from.                   |
 
 ### Decisions and findings
 
@@ -230,6 +249,7 @@ erDiagram
 **Loader behaviour.** Idempotent (`INSERT ... ON CONFLICT ... DO UPDATE`, only replacing a row when the incoming `retrieved_at` is the same or newer; no `INSERT OR REPLACE`, no `to_sql`), atomic (the whole load runs in a single transaction, `with con:`), parameterised (every value goes through a `?` placeholder), and every connection goes through `connect()` in `src/db.py`, which sets `PRAGMA foreign_keys = ON` first. `src/checks.py` demonstrates all of this on a temporary copy.
 
 **Known issues.**
+
 - Open-Meteo is requested with `forecast_days=1`, so hours later than the retrieval time are forecasts, not observations. `weather_hourly` does not distinguish them: a later run overwrites a forecast hour with newer values (latest `retrieved_at` wins). Separating forecast from observed values is left for M3.
 - 3 of the 12 states seen again in a later snapshot have a different `baro_altitude` than in the first snapshot. The latest retrieved version is kept.
 - OpenSky `callsign` values are stored exactly as received, including trailing spaces. `icao24` is trimmed and lower-cased only so that it can be used as a key.
@@ -239,7 +259,7 @@ erDiagram
 
 ### Analytical query
 
-The question connects directly to our project question (weather versus air traffic around major airports): *at each weather location, how windy was it, and how much air traffic was reported close to it (within 0.25 degrees, about 28 km)?* The query is in [sql/queries/01_wind_and_nearby_traffic.sql](sql/queries/01_wind_and_nearby_traffic.sql). Its result grain is one row per location. Weather and traffic are aggregated to the location grain in separate CTEs before they are joined, so the join cannot multiply rows.
+The question connects directly to our project question (weather versus air traffic around major airports): _at each weather location, how windy was it, and how much air traffic was reported close to it (within 0.25 degrees, about 28 km)?_ The query is in [sql/queries/01_wind_and_nearby_traffic.sql](sql/queries/01_wind_and_nearby_traffic.sql). Its result grain is one row per location. Weather and traffic are aggregated to the location grain in separate CTEs before they are joined, so the join cannot multiply rows.
 
 ```sql
 WITH weather AS (
@@ -272,13 +292,13 @@ ORDER BY w.avg_gust_kmh DESC;
 
 Output (on the landed raw files):
 
-| location_index | latitude | longitude | weather_hours | avg_gust_kmh | max_gust_kmh | nearby_states | nearby_aircraft |
-|---|---|---|---|---|---|---|---|
-| 0 | 41.258053 | 28.772957 | 96 | 20.3 | 41.4 | 61 | 50 |
-| 1 | 40.886364 | 29.251366 | 96 | 14.4 | 35.6 | 21 | 21 |
-| 4 | 36.9086 | 30.838587 | 96 | 14.1 | 33.8 | 21 | 19 |
-| 3 | 38.287888 | 27.12891 | 96 | 9.9 | 22.3 | 3 | 3 |
-| 2 | 40.119682 | 32.95298 | 96 | 8.3 | 24.8 | 1 | 1 |
+| location_index | latitude  | longitude | weather_hours | avg_gust_kmh | max_gust_kmh | nearby_states | nearby_aircraft |
+| -------------- | --------- | --------- | ------------- | ------------ | ------------ | ------------- | --------------- |
+| 0              | 41.258053 | 28.772957 | 96            | 20.3         | 41.4         | 61            | 50              |
+| 1              | 40.886364 | 29.251366 | 96            | 14.4         | 35.6         | 21            | 21              |
+| 4              | 36.9086   | 30.838587 | 96            | 14.1         | 33.8         | 21            | 19              |
+| 3              | 38.287888 | 27.12891  | 96            | 9.9          | 22.3         | 3             | 3               |
+| 2              | 40.119682 | 32.95298  | 96            | 8.3          | 24.8         | 1             | 1               |
 
 Istanbul (index 0) has both the highest average gusts and the most nearby aircraft. With only a few snapshots this is a first look, not a conclusion: aircraft counts depend on when the snapshots happened to be taken.
 
@@ -294,14 +314,26 @@ python src/checks.py    # six checks on a temporary copy: all must print PASS
 
 The database file is derived data and is not committed (`data/*.db` is in `.gitignore`); anyone with the raw files can rebuild it with the commands above.
 
+## Data Quality
+
+We profiled both sources and found 20 issues across all six families; the full register, the flag dictionary, the thresholds and what we cannot say are in [docs/cleaning_report.md](docs/cleaning_report.md). The most important findings: altitude and vertical rate are missing almost only for aircraft on the ground (so any altitude average means "airborne only"), a placeholder altitude of -304.8 m (-1000 ft) hides among real values, 18 states have contradicting barometric and geometric altitudes, and the gust outlier method flags many ordinary afternoon gusts at Ankara although 27 October is the one clear storm. The cleaned layer (`aircraft_state_clean`, `weather_hourly_clean`) keeps every raw value next to the cleaned value and a flag that says why they differ; the M2 tables are never changed, no row is deleted, and nothing is imputed.
+
+Build and check everything from a fresh clone with landed raw data:
+
+```bash
+python src/load.py
+python src/clean.py
+python src/validate.py
+```
+
 ## Status
 
-M2 — schema and load complete.
+M3 — cleaned layer and quality report complete.
 
 ## Team
 
-| Name | GitHub |
-|------|--------|
-| Enes Akdeniz (230717022) | [@se-230717022](https://github.com/se-230717022) |
-| Nihat Avcı (230719001) | [@se-230719001](https://github.com/se-230719001) |
+| Name                       | GitHub                                           |
+| -------------------------- | ------------------------------------------------ |
+| Enes Akdeniz (230717022)   | [@se-230717022](https://github.com/se-230717022) |
+| Nihat Avcı (230719001)     | [@se-230719001](https://github.com/se-230719001) |
 | Mehmetali Açık (240719001) | [@se-240719001](https://github.com/se-240719001) |

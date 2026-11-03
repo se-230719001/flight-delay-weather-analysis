@@ -1,83 +1,187 @@
 # Cleaning Report: flight-delay-weather-analysis
 
-> DRAFT. Counts are from the database built on 2026-10-20 (4 OpenSky snapshots, 4 Open-Meteo files). Re-run `load.py`, `clean.py` and `validate.py` after fetching more data and update every number. "Investigated by" is a proposed split: change it to who really did the work.
+Data: database built on 2026-11-03 from 16 OpenSky snapshots and 10 Open-Meteo files (3,009 aircraft states of 1,642 aircraft; 1,920 weather hours at 5 airports). Profile notebook: [notebooks/m3_profile.ipynb](../notebooks/m3_profile.ipynb).
 
 ## 1. Summary
-TODO (5-6 sentences at the end: what data, the most important problems, what the cleaned layer contains, what we still can't say, and any M2 issues fixed since the M2 tag).
+
+We profiled both sources and found 20 issues across all six families, listed in section 3. The most important ones are: altitude and vertical rate are missing almost only for aircraft on the ground (a missing-at-random pattern that makes altitude averages mean "airborne only"); a placeholder altitude of -304.8 m (-1000 ft) hiding in the data as a plausible-looking value; 18 states whose barometric and geometric altitudes contradict each other; one state with an impossible speed of 663 m/s; and a gust "outlier" method that flags many ordinary daytime gusts at Ankara. The cleaned layer (`aircraft_state_clean`, `weather_hourly_clean`) has exactly the rows of the M2 tables, keeps every raw value next to the cleaned one with a flag that says why they differ, and imputes nothing. Unusual values are flagged and kept; only invalid, contradictory or placeholder values become NULL. We cannot say whether the weather hours after a retrieval were observed or forecast, and our aircraft data covers daytime only on 10 days, so it is not a continuous record. M2 issues fixed since the M2 tag: none (`db.py` only gained a helper that creates the cleaned schema).
 
 ## 2. Profile highlights
-Profile: [notebooks/m3_profile.ipynb](../notebooks/m3_profile.ipynb). TODO: paste the 2-3 tables that led to findings (missing share by `on_ground`; gust robust-z counts per location; `|geo - baro|` altitude gap).
+
+Missing share by `on_ground` (notebook section 2): the missingness depends on whether the aircraft is on the ground.
+
+| on_ground     | states | baro_altitude NULL | geo_altitude NULL | vertical_rate NULL | squawk NULL | empty callsign |
+| ------------- | ------ | ------------------ | ----------------- | ------------------ | ----------- | -------------- |
+| 0 (airborne)  | 2,833  | 2 (0.1%)           | 18 (0.6%)         | 1 (0.0%)           | 663 (23%)   | 32 (1.1%)      |
+| 1 (on ground) | 176    | 169 (96%)          | 176 (100%)        | 167 (95%)          | 96 (55%)    | 39 (22%)       |
+
+Gap between barometric and geometric altitude, states with both (2,815): median 229 m, 95th percentile 419 m, 99th percentile 729 m, maximum 10,569 m. Robust-z gust flags per day and airport (notebook section 9b): 27 October lights up IST, SAW, ESB and AYT together (25 hours); the other flagged hours are almost all at ESB (37 of 43 with gusts below 25 km/h), between 09:00 and 15:00 UTC.
+
+We compared two robust methods for gusts before choosing one. The IQR fence flags 69 gust hours and the robust z-score (median and MAD, per airport) flags 82; both agree that 27 October is the one real event (IST 57.6 km/h, SAW 57.2 km/h, with mean winds of 25-32 km/h at the same hours, so gusts and mean wind move together). We looked at what the methods flag before trusting them: at Ankara (ESB) almost every flagged hour is an ordinary 09:00-15:00 UTC gust below 25 km/h, because ESB's calm nights make its spread small. We kept the per-airport robust z (the assignment's required family of methods) and documented this weakness instead of hiding it (I-11). We never used mean plus or minus 3 standard deviations, and we did not delete any flagged value.
+
+Two things surprised us. First, the check for classic sentinels (-999 and similar) found nothing, yet a placeholder was present: it only showed up when we looked at the lowest value and the most frequent values of barometric altitude on the ground (I-06). Second, the one impossible speed (663 m/s) belongs to an otherwise normal airliner state, so the whole state cannot be dropped: only the two impossible fields are set to NULL.
 
 ## 3. Issues register
 
-| ID | Family | Table.column | What | Where / when / how many | Evidence | Cause | Decision | Flag | Investigated by |
-|---|---|---|---|---|---|---|---|---|---|
-| I-01 | 1 Missing | aircraft_state.baro_altitude, geo_altitude, vertical_rate | NULL almost only when the aircraft is on the ground | 42 ground states: baro NULL in 40, geo NULL in 42, vertical rate NULL in 38; airborne states (748): baro NULL in 1 | Cross-tab of NULL by `on_ground` (notebook section 2) | Inferred: ground transmissions often carry no altitude; no document read yet | NULL, kept as missing, reason recorded | `missing_on_ground` | Enes Akdeniz |
-| I-02 | 1 Missing | aircraft_state.baro_altitude, geo_altitude | NULL while airborne | baro 1 row, geo 5 rows (of 748 airborne) | Same cross-tab | Unknown | NULL, kept, flagged | `missing_not_reported` | Enes Akdeniz |
-| I-03 | 1 Missing | aircraft_state.squawk | NULL in 218 of 790 states | 45% of ground states (19 of 42), 27% of airborne (199 of 748) | Share by `on_ground` differs, so not MCAR | Unknown (transponder not squawking or message not received) | NULL, kept, flagged; squawk is not used in the analysis | `missing_not_reported` | Nihat Avcı |
-| I-04 | 1 Missing / 5 Text | aircraft_state.callsign | Empty string instead of NULL | 20 states (13 airborne, 7 on ground) | `repr()` shows `''` or spaces only | Inferred: the aircraft sent no callsign | Cleaned value NULL | `missing_empty` | Nihat Avcı |
-| I-05 | 5 Text | aircraft_state.callsign | Fixed-width values padded with trailing spaces | 768 of 790 states | `repr()` shows e.g. a callsign followed by spaces | Inferred: fixed 8-character field | Trim whitespace only (no case change, no renaming) | `trimmed` | Nihat Avcı |
-| I-06 | 4 Across fields | aircraft_state.baro_altitude vs geo_altitude | The two altitudes contradict each other by more than 1,000 m | 2 states, both in snapshot 2026-10-20T10:14:56Z: `73828a` (1,333.5 vs 10,591.8 m), `152073` (10,248.9 vs 11,491.0 m) | Median gap 274 m, 95th percentile 434 m (notebook section 8) | Unknown: we cannot tell which altitude is wrong | Both set to NULL, raw values kept | `altitude_mismatch` | Mehmetali Açık |
-| I-07 | 3 Unusual | weather_hourly.wind_gusts_10m | Extreme for that location, but possible | 28 hours (AYT 9, ESB 14, SAW 5) with robust z > 3.5 per location | IQR fence and robust z compared (notebook section 9); IST's largest gusts (41.4 km/h, 9 Oct 09:00-11:00 UTC) are not flagged because IST's spread is wide | Inferred: real wind events; gusts never fall below the mean wind speed | Kept unchanged, flagged | `unusual_high` | Mehmetali Açık |
-| I-08 | 3 Unusual | weather_hourly.cape | High CAPE at Antalya | 6 hours, AYT, 8 Oct 12:00-17:00 UTC, peak 1,650 J/kg | CAPE is 0 most hours, so IQR and MAD are 0 and unusable; a domain threshold (1,000 J/kg) is used instead | Inferred: real convective instability (the hours are consecutive and smooth) | Kept, flagged | `unusual_high` | Mehmetali Açık |
-| I-09 | 4 Across rows | aircraft_state.time_position vs retrieved_at | `time_position` is later than the file's `retrieved_at` | 472 of 790 states, by at most 3 s | Notebook section 8 (age at retrieval) | Inferred: file name stamp has 1 s resolution and is taken on our clock; OpenSky time comes from its server | No change, no flag; do not treat `retrieved_at` as an exact time | none | Enes Akdeniz |
-| I-10 | 6 Identity | aircraft_state.callsign per aircraft | One aircraft carries different callsigns over time | 20 of 461 aircraft, e.g. `151e1b`: PBD840 then PBD798 | Notebook section 10 | Inferred: one aircraft flies different flights | No merge: `icao24` stays the identity; callsign stays per state | none | Nihat Avcı |
-| I-11 | 6 Identity | aircraft_state.callsign | One callsign used by two aircraft | `PALAZ03`: 2 `icao24` values | Notebook section 10 | Unknown | No merge, nothing changed | none | Nihat Avcı |
-| I-12 | 6 Identity / 5 Categories | location | Weather locations have no ID or name (the first has no `location_id`); names live only in `.env` order | 5 locations | Returned grid points are 2.5-5 km from the requested airport coordinates | Confirmed by our own request list (`ingest.py` defaults, order IST, SAW, ESB, ADB, AYT) | Mapping table `location_airport` loaded from `data/mappings/location_airport.csv` | none | Mehmetali Açık |
-| I-13 | 1 Missing (whole periods) | all tables | Time coverage has large gaps | Weather only for 8, 9, 19, 20 Oct (24 h x 5 locations each); aircraft only in 4 snapshots | `GROUP BY` day | Confirmed: ingestion was run by hand on those days | Nothing to clean; M4 cannot compare across the gap or treat snapshots as continuous | none | Enes Akdeniz |
-| I-14 | 5 Units | aircraft_state vs weather_hourly | Different units across sources: altitude m, speed m/s; wind km/h | all numeric columns | `hourly_units` in the Open-Meteo files; OpenSky field description | Confirmed (source documentation) | Native units kept in M3; any conversion happens in M4 and says so | none | Nihat Avcı |
-| I-15 | 4 Across rows | weather_hourly (all columns) | Hours after the retrieval time are forecasts, and a later run overwrites them | Every file contains future hours (`forecast_days=1`) | `docs/sources.md`; same-day refetches were identical | Confirmed (Open-Meteo is a forecast API) | Not flagged (the loader cannot tell forecast from observation); M4 must only use hours before `retrieved_at` | none | Mehmetali Açık |
+| ID   | Family                    | Table.column                                              | What                                                                  | Where / when / how many                                                                                                      | Evidence                                                                                                               | Cause                                                                                                                                                           | Decision                                                                                      | Flag                   | Investigated by |
+| ---- | ------------------------- | --------------------------------------------------------- | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- | ---------------------- | --------------- |
+| I-01 | 1 Missing                 | aircraft_state.baro_altitude, geo_altitude, vertical_rate | NULL almost only for aircraft on the ground                           | 176 ground states: baro NULL in 169, geo in 176, vertical rate in 167                                                        | Table in section 2                                                                                                     | Inferred: ground transmissions carry no altitude; no provider document read                                                                                     | NULL, reason recorded                                                                         | `missing_on_ground`    | Enes Akdeniz    |
+| I-02 | 1 Missing                 | aircraft_state.baro_altitude, geo_altitude, vertical_rate | NULL while airborne                                                   | baro 2, geo 18, vertical rate 1 (of 2,833)                                                                                   | Same cross-tab                                                                                                         | Unknown                                                                                                                                                         | NULL, kept as missing                                                                         | `missing_not_reported` | Enes Akdeniz    |
+| I-03 | 1 Missing                 | aircraft_state.squawk                                     | NULL in 759 of 3,009 states (25%)                                     | 55% on the ground, 23% airborne; 18-34% per snapshot                                                                         | Share differs by `on_ground`, so not MCAR                                                                              | Unknown                                                                                                                                                         | NULL, kept; squawk is not used for the project question                                       | `missing_not_reported` | Nihat Avcı      |
+| I-04 | 1 Missing / 5 Text        | aircraft_state.callsign                                   | Empty or blank string instead of NULL                                 | 71 states (32 airborne, 39 on ground)                                                                                        | `repr()` shows `''` or spaces only                                                                                     | Inferred: no callsign broadcast (22% of ground states)                                                                                                          | NULL                                                                                          | `missing_empty`        | Nihat Avcı      |
+| I-05 | 5 Text                    | aircraft_state.callsign                                   | Fixed-width values padded with trailing spaces                        | 2,934 of 3,009 states                                                                                                        | `repr()`, e.g. a callsign plus spaces (notebook section 4)                                                             | Inferred: fixed 8-character field                                                                                                                               | Trim whitespace only; no case or spelling change                                              | `trimmed`              | Nihat Avcı      |
+| I-06 | 2 Invalid                 | aircraft_state.baro_altitude                              | Placeholder altitude of -304.8 m (-1000 ft)                           | 2 states of aircraft `514005`, on the ground, speed 0, same position, 21 and 24 Oct                                          | Lowest value in the column, repeated; -1000 ft is the lowest value of the ADS-B altitude encoding (notebook section 3) | Inferred: placeholder, not a measurement (no geometric altitude either)                                                                                         | NULL, raw kept                                                                                | `invalid_sentinel`     | Enes Akdeniz    |
+| I-07 | 2 Invalid                 | aircraft_state.velocity, vertical_rate                    | Impossible speed and climb rate                                       | 1 state: `4bb18f` (THY281), 2026-10-31T12:31:04Z, 663.3 m/s and 165.8 m/s at 3,155 m                                         | Largest plausible speed is 319 m/s, vertical rate 21 m/s; its altitudes also differ by 891 m                           | Unknown (corrupted state vector; seen only once, so no neighbour to compare)                                                                                    | velocity and vertical rate NULL, other fields kept                                            | `invalid_range`        | Mehmetali Açık  |
+| I-08 | 4 Across fields           | aircraft_state.baro_altitude vs geo_altitude              | The two altitudes contradict each other by more than 1,000 m          | 18 of 2,815 states, in 10 of 16 snapshots (1-3 each); gaps 1.2-10.6 km; baro above geo in 12                                 | Gap distribution in section 2                                                                                          | Mixed: 8 gaps are 1.2-1.9 km and 6 of them have a vertical rate above 7 m/s (inferred: one altitude lags in a climb or descent); the 10 larger gaps are unknown | Both altitudes NULL (we cannot tell which is wrong), raw kept                                 | `altitude_mismatch`    | Mehmetali Açık  |
+| I-09 | 4 Across fields           | aircraft_state.on_ground vs velocity                      | Aircraft marked on the ground that move fast                          | 9 of 176 ground states above 50 m/s; 83 aircraft appear both airborne and on the ground                                      | Notebook section 8                                                                                                     | Inferred: take-off or landing roll, or a lagging `on_ground` flag                                                                                               | No change, no flag                                                                            | none                   | Mehmetali Açık  |
+| I-10 | 4 Across rows             | weather_hourly.wind_gusts_10m                             | Identical gust for 6 consecutive hours                                | ESB, 25 Oct 18:00-23:00 UTC: 6.8 km/h while mean wind varied 3.6-4.0                                                         | Longest other runs: 5 h of gusts (AYT), 5 h of wind speed (ESB)                                                        | Unknown (model output, not a sensor, so quantisation is possible); borderline                                                                                   | NULL, raw kept; with `STUCK_RUN = 7` nothing would be flagged                                 | `stuck_value`          | Mehmetali Açık  |
+| I-11 | 3 Unusual                 | weather_hourly.wind_gusts_10m                             | Gust extreme for that airport                                         | 82 hours: ESB 43, AYT 27, IST 5, ADB 4, SAW 3; 25 of them on 27 Oct at four airports (IST peak 57.6 km/h)                    | Robust z per airport; IQR flags 69 hours; cross-airport agreement on 27 Oct                                            | Inferred: 27 Oct is a real storm; the ESB hours are ordinary daytime gusts (cutoff 17.5 km/h because calm nights give a tiny MAD)                               | Kept unchanged, flagged                                                                       | `unusual_high`         | Mehmetali Açık  |
+| I-12 | 3 Unusual                 | weather_hourly.cape                                       | High CAPE at Antalya                                                  | 6 consecutive hours, 8 Oct 12:00-17:00 UTC, peak 1,650 J/kg                                                                  | CAPE is 0 most hours, so IQR and MAD are 0 and unusable; fixed 1,000 J/kg threshold                                    | Inferred: real convective instability (smooth, consecutive hours)                                                                                               | Kept, flagged                                                                                 | `unusual_high`         | Mehmetali Açık  |
+| I-13 | 4 Across rows             | aircraft_state.time_position vs retrieved_at              | `time_position` is later than the file's `retrieved_at`               | 2,077 of 3,009 states, by up to 13 s; median age at retrieval -3 s                                                           | Notebook section 8b                                                                                                    | Inferred: our computer clock is about 3 s behind OpenSky's                                                                                                      | No change; `retrieved_at` is not an exact time                                                | none                   | Enes Akdeniz    |
+| I-14 | 4 Across rows             | aircraft_state.time_position                              | Some states are old when retrieved                                    | 95 states older than 5 min, 22 older than 15 min, oldest 3,622 s                                                             | Age at retrieval (notebook section 8b)                                                                                 | Inferred: the API returns the last known state of aircraft recently heard                                                                                       | Kept; use `time_position`, not `retrieved_at`, as the event time                              | none                   | Enes Akdeniz    |
+| I-15 | 6 Identity                | aircraft_state.callsign per aircraft                      | One aircraft with several callsigns                                   | 483 of 1,626 aircraft, e.g. `01023f`: RSX336 and RSX337                                                                      | Notebook section 10                                                                                                    | Inferred: the same aircraft flies several flights over three weeks                                                                                              | No merge: `icao24` is the identity, callsign stays per state                                  | none                   | Nihat Avcı      |
+| I-16 | 6 Identity                | aircraft_state.callsign across aircraft                   | One callsign on several aircraft                                      | 186 callsigns, up to 3 aircraft each (e.g. `AEE5GS`)                                                                         | Notebook section 10                                                                                                    | Inferred: an airline reuses a flight number on different days                                                                                                   | No merge; callsign is not an identifier                                                       | none                   | Nihat Avcı      |
+| I-17 | 6 Identity / 5 Categories | location                                                  | Weather locations have no ID or name (the first has no `location_id`) | 5 locations                                                                                                                  | Returned grid points are 2.5-5.0 km from the requested airport coordinates                                             | Confirmed: our own request order (`ingest.py`)                                                                                                                  | Mapping table from `data/mappings/location_airport.csv`                                       | none                   | Mehmetali Açık  |
+| I-18 | 1 Missing (periods)       | all tables                                                | Large gaps in time coverage                                           | Weather on 16 days (8-9, 19-27, 30-31 Oct, 1-3 Nov); aircraft in 16 snapshots on 10 days, always between 08:00 and 19:59 UTC | Notebook section 10b                                                                                                   | Confirmed: ingestion was run by hand                                                                                                                            | Nothing to clean; M4 cannot compare across gaps or at night                                   | none                   | Enes Akdeniz    |
+| I-19 | 5 Units                   | aircraft_state vs weather_hourly                          | Different units per source                                            | altitude m, speed m/s; wind km/h                                                                                             | `hourly_units` in the Open-Meteo files; OpenSky field description                                                      | Confirmed (source documentation)                                                                                                                                | Native units kept; any conversion happens in M4 and says so                                   | none                   | Nihat Avcı      |
+| I-20 | 4 Across rows             | weather_hourly (all columns)                              | Hours after the retrieval are forecasts, not observations             | 260 of 1,920 rows still hold an hour later than the file that supplied them                                                  | Notebook section 10b; `docs/sources.md`                                                                                | Confirmed (Open-Meteo is a forecast API)                                                                                                                        | Not flagged (the loader cannot tell them apart); M4 must only use hours before `retrieved_at` | none                   | Mehmetali Açık  |
 
 ### Checked and not found
 
-| Family | Check | Result |
-|---|---|---|
-| 2 Invalid | Sentinels -999, -9999, 9999, 99999 in every numeric column of both sources | 0 rows (notebook section 3) |
-| 2 Invalid | Latitude/longitude outside the requested bounding box; negative velocity; `true_track` outside 0-360; negative baro altitude | 0 each (notebook section 7) |
-| 2 Invalid | Weather: negative values; gust below mean wind speed; showers above precipitation | 0 each |
-| 2 Invalid | `squawk` not four octal digits; emergency codes 7500/7600/7700 | 0 each |
-| 1 Missing | NULL values in `weather_hourly` | 0 in all five variables |
-| 4 Across rows | Stuck wind values: longest run of identical hourly values | 2 h (wind speed), 4 h (gusts), below `STUCK_RUN = 6` |
-| 4 Across rows | Spikes: largest hour-to-hour wind speed change | 10.3 km/h, no spike |
-| 4 Across fields | `last_contact` before `time_position` | 0 rows |
-| 5 Text | `origin_country`: values not NFC-normalised, non-ASCII characters, case/whitespace duplicates | none of the three |
-| 5 Text | `icao24` is 6 lowercase hex characters | all 470 aircraft |
-| 6 Identity | One `icao24` with more than one `origin_country` | 0 (M2 key test) |
-| (M2) | Duplicates by key, quarantined records | 0 after load (duplicates are M2's job) |
+| Family          | Check                                                                                                                                 | Result                                                                                                                                                |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2 Invalid       | Values -999, -9999, 9999, 99999 in every numeric column, both sources                                                                 | 0 rows. The real placeholder (-304.8 m, I-06) was not in this list and was found by looking at the minimum and the most frequent values on the ground |
+| 2 Invalid       | Latitude or longitude outside the requested bounding box; negative velocity; `true_track` outside 0-360; baro altitude above 20,000 m | 0 each                                                                                                                                                |
+| 2 Invalid       | Weather: negative values; gust below mean wind speed; showers above precipitation                                                     | 0 each                                                                                                                                                |
+| 2 Invalid       | `squawk` not four octal digits; emergency codes 7500/7600/7700                                                                        | 0 each                                                                                                                                                |
+| 1 Missing       | NULL values in any `weather_hourly` column                                                                                            | 0                                                                                                                                                     |
+| 4 Across rows   | Spikes: largest hour-to-hour wind speed change                                                                                        | 14.7 km/h (SAW), no spike                                                                                                                             |
+| 4 Across fields | `last_contact` before `time_position`                                                                                                 | 0 rows                                                                                                                                                |
+| 5 Text          | `origin_country`: 74 values, not NFC-normalised, non-ASCII, or duplicates after trimming and casefolding                              | none of the three                                                                                                                                     |
+| 5 Text          | `icao24` is 6 lowercase hex characters                                                                                                | all 1,642 aircraft                                                                                                                                    |
+| 6 Identity      | One `icao24` with more than one `origin_country`                                                                                      | 0                                                                                                                                                     |
+| M2              | Records in quarantine                                                                                                                 | 0 (duplicates by key are M2's job)                                                                                                                    |
 
 ## 4. Missing values
-TODO per pattern: where and when, mechanism, consequence for M4. Starting points:
-- **Altitude and vertical rate (I-01/I-02):** MAR. Missingness depends on `on_ground`, which we observe (95% of ground states have no baro altitude, 0.1% of airborne). Consequence: averages of altitude over all states silently mean "airborne only"; ground states must be handled explicitly.
-- **Squawk (I-03):** not MCAR (45% on the ground vs 27% airborne); the remaining cause is unknown. Consequence: do not use `squawk` as a feature without checking this.
-- **Whole periods (I-13):** MNAR in effect, because the data exists only on the days we ran the ingestion. Consequence: no trends or delay comparisons across 10-18 Oct.
+
+- **Altitude and vertical rate (I-01, I-02):** MAR. Missingness depends on `on_ground`, which we observe (96% of ground states vs 0.1% of airborne for baro altitude). Consequence for M4: an average altitude or climb rate over all states silently means "airborne only"; always filter or group by `on_ground`. The 18 airborne states without geometric altitude are of unknown mechanism.
+- **Squawk (I-03):** not MCAR (55% on the ground vs 23% airborne, 18-34% across snapshots); the remaining cause is unknown. Consequence: do not use squawk as a feature without modelling this.
+- **Empty callsigns (I-04):** MAR on `on_ground` (22% on the ground vs 1.1% airborne), inferred cause: parked aircraft do not broadcast an identity. Consequence: counting flights by callsign undercounts ground traffic.
+- **Whole periods (I-18):** MNAR in effect, because data exists only when we ran the ingestion by hand (daytime). Consequence: no trends across the 10-18 Oct and 28-29 Oct weather gaps, and no conclusion about night traffic.
+- **Weather:** nothing is missing in the raw data. The only NULLs in the cleaned weather table (6 gust values) come from our stuck-value rule (I-10), so they are our decision, not the source's.
 
 ## 5. Flags and rules
-Rule order (first rule that applies wins): 1 missing, 2 invalid, 3 stuck, 4 unusual (flagged and kept), 5 ok. Full list of allowed values: `sql/clean_schema.sql`.
 
-| Order | Flag | Meaning | Rule | Cleaned value | Count (20 Oct build) |
-|---|---|---|---|---|---|
-| 1 | `missing_on_ground` | NULL while `on_ground = 1` | raw IS NULL and on_ground = 1 | NULL | baro 40, geo 42, vertical rate 38 |
-| 1 | `missing_not_reported` | NULL otherwise | raw IS NULL | NULL | baro 1, geo 5, squawk 218 |
-| 1 | `missing_empty` | callsign is an empty string | TRIM(raw) = '' | NULL | 20 |
-| 2 | `invalid_range` | outside the plausible range | see constants | NULL | 0 |
-| 2 | `altitude_mismatch` | baro and geo disagree | abs(geo - baro) > `ALT_GAP_MAX_M` | NULL (both) | 2 states |
-| 2 | `invalid_gust_below_speed`, `invalid_showers_above_precip`, `invalid_format` | contradicts another field / format | see `clean.py` | NULL | 0 |
-| 3 | `stuck_value` | identical non-zero wind value for `STUCK_RUN` consecutive hours | run detection per location | NULL | 0 |
-| 4 | `unusual_high` | extreme but possible | gust robust z > `ROBUST_Z_THRESHOLD` per location; CAPE > `CAPE_UNUSUAL_JKG` | unchanged | gusts 28, CAPE 6 |
-| 4 | `emergency_code` | squawk 7500/7600/7700 | in `EMERGENCY_SQUAWKS` | unchanged | 0 |
-| 4 | `trimmed` | callsign had padding | TRIM(raw) <> raw | trimmed text | 768 |
-| 5 | `ok` | nothing to change | | raw value | the rest |
+Rule order (first rule that applies wins; one flag per value): 1 missing, 2 invalid (range, placeholder, contradiction), 3 stuck, 4 unusual (flagged and kept), 5 ok. All allowed values are in `sql/clean_schema.sql` as `CHECK` constraints; all thresholds are in `src/clean_config.py`.
+
+| Order | Flag                                                                         | Meaning                                                         | Rule                                                                         | Cleaned value | Count                                       |
+| ----- | ---------------------------------------------------------------------------- | --------------------------------------------------------------- | ---------------------------------------------------------------------------- | ------------- | ------------------------------------------- |
+| 1     | `missing_on_ground`                                                          | NULL while on the ground                                        | raw IS NULL and `on_ground = 1`                                              | NULL          | baro 169, geo 176, vertical rate 167        |
+| 1     | `missing_not_reported`                                                       | NULL otherwise                                                  | raw IS NULL                                                                  | NULL          | baro 2, geo 18, vertical rate 1, squawk 759 |
+| 1     | `missing_empty`                                                              | callsign is empty or blank                                      | TRIM(raw) = ''                                                               | NULL          | 71                                          |
+| 2     | `invalid_range`                                                              | outside the plausible range                                     | see constants                                                                | NULL          | velocity 1, vertical rate 1                 |
+| 2     | `invalid_sentinel`                                                           | placeholder altitude                                            | baro = `SENTINEL_BARO_M`                                                     | NULL          | 2                                           |
+| 2     | `altitude_mismatch`                                                          | baro and geo disagree                                           | abs(geo - baro) > `ALT_GAP_MAX_M`                                            | NULL (both)   | 18 states                                   |
+| 2     | `invalid_gust_below_speed`, `invalid_showers_above_precip`, `invalid_format` | contradicts another field or format                             | see `clean.py`                                                               | NULL          | 0                                           |
+| 3     | `stuck_value`                                                                | identical non-zero wind value for `STUCK_RUN` consecutive hours | run detection per location                                                   | NULL          | 6                                           |
+| 4     | `unusual_high`                                                               | extreme but possible                                            | gust robust z > `ROBUST_Z_THRESHOLD` per location; CAPE > `CAPE_UNUSUAL_JKG` | unchanged     | gusts 82, CAPE 6                            |
+| 4     | `emergency_code`                                                             | squawk 7500/7600/7700                                           | in `EMERGENCY_SQUAWKS`                                                       | unchanged     | 0                                           |
+| 4     | `trimmed`                                                                    | callsign had padding                                            | TRIM(raw) differs from raw                                                   | trimmed text  | 2,934                                       |
+| 5     | `ok`                                                                         | nothing to change                                               |                                                                              | raw value     | the rest                                    |
+
+Why this order: a missing value is recorded first because nothing else can be said about it. Invalid values come next because they must never reach the "unusual" step, where an impossible value would look like an extreme one. Stuck values come before unusual values because a repeated number is a data problem, not an event. Unusual values come last and are the only rule that keeps the value. When two rules could apply (an altitude that is both a placeholder and contradicts the other altitude), the earlier rule in the order wins.
 
 ### Constants
-TODO: one sentence for each constant in `src/clean_config.py` (why this value, what changes if you move it). The comments in that file hold the profile evidence to copy from: `ALT_MIN_M`, `ALT_MAX_M`, `ALT_GAP_MAX_M`, `VELOCITY_MAX_MS`, `VERTICAL_RATE_MAX_MS`, `BBOX`, `WIND_MAX_KMH`, `PRECIP_MAX_MM_H`, `CAPE_MAX_JKG`, `STUCK_RUN`, `ROBUST_Z_THRESHOLD`, `CAPE_UNUSUAL_JKG`, `UNUSABLE_SHARE_MAX`, `AIRBORNE_ALT_USABLE_MIN`, `FRESHNESS_HOURS`. A constant you cannot justify is a guess: say so.
+
+- `BBOX = (36, 26, 42, 45)`: the area we requested in `ingest.py`; a position outside it cannot come from our request.
+- `ALT_MIN_M = -500`: no airport in the area is below sea level by more than the lowest land (about -430 m); the lowest altitude we kept is -304.8 m, which we handle as a placeholder (I-06).
+- `ALT_MAX_M = 20000`: above any airliner's ceiling; the highest geometric altitude is 14,592 m.
+- `SENTINEL_BARO_M = -304.8`: -1000 ft, the repeated lowest value; it comes from two states of one parked aircraft, so the evidence is thin (we call it inferred).
+- `ALT_GAP_MAX_M = 1000`: above the 99th percentile of the gap (729 m) and 2.4 times the 95th (419 m); 18 states (0.6%) exceed it. Moving it to 1,500 m would unflag 8 of the 18.
+- `VELOCITY_MAX_MS = 400` and `VERTICAL_RATE_MAX_MS = 100`: physical bounds well above the largest plausible values (319 m/s and 22 m/s) and well below the one impossible state (663 and 166 m/s); any value in between would not change the result.
+- `EMERGENCY_SQUAWKS`: the three international emergency codes; none occurs.
+- `WIND_MAX_KMH = 300`, `PRECIP_MAX_MM_H = 300`, `CAPE_MAX_JKG = 10000`: physical upper bounds, not derived from our data (the largest values we saw are 57.6 km/h, 6.2 mm and 1,650 J/kg); we cannot justify them further, and moving them changes nothing on this data.
+- `STUCK_RUN = 6`: the longest identical runs other than the flagged one are 5 hours (wind speed at ESB, gusts at AYT), so 6 is the smallest value that flags only the one outlying run. It is borderline: with 7 nothing is flagged.
+- `ROBUST_Z_THRESHOLD = 3.5`: the usual cut-off for the median/MAD score; it flags 82 gust hours, 37 of them ordinary daytime gusts at ESB, so it over-flags at a calm airport (I-11). Raising it to 5 would keep mainly the 27 Oct event.
+- `CAPE_UNUSUAL_JKG = 1000`: CAPE is zero most hours so IQR and MAD cannot be used; 1,000 J/kg is the conventional start of strong instability. It flags only the 6 Antalya hours.
+- `UNUSABLE_SHARE_MAX = 0.05`, `AIRBORNE_ALT_USABLE_MIN = 0.95`, `FRESHNESS_HOURS = 48`: warning levels chosen above today's values (worst NULL share 1.6%, airborne usable share 99.3%, ingestion run by hand every few days); they are guesses about what counts as healthy, not findings.
 
 ## 6. Mapping and identity decisions
-- `data/mappings/location_airport.csv`: 5 of 5 locations matched by `location_index` (position in the request). Evidence: grid point 2.5-5 km from the requested airport coordinates (see the `note` column). TODO: fill `decided_by` with the real person.
-- No identity merges were needed (I-10, I-11): one aircraft changing callsign is normal and `icao24` is stable; a shared callsign is not evidence of one aircraft.
+
+- `data/mappings/location_airport.csv`: 5 of 5 weather locations matched by `location_index` (their position in the request); no fuzzy matching was needed and nothing stayed unmatched. Decided by Enes Akdeniz (IST, ADB), Mehmetali Açık (SAW, AYT) and Nihat Avcı (ESB). Evidence: each returned grid point lies 2.5-5.0 km from the requested airport coordinates (see the `note` column).
+- Aircraft: no identity merge. An aircraft is one `icao24` (never more than one country); callsign changes (I-15) and shared callsigns (I-16) are normal and are not evidence of a split or merged entity.
+- `origin_country`: 74 values, already consistent (checked, nothing to map).
 
 ## 7. Counts and validation
-TODO: paste the final output of `python src/clean.py` (run twice) and `python src/validate.py`. Classify every WARN as a problem in the world, the measurement or the pipeline (the current WARN, `altitude_mismatch` flags: measurement).
-How each STOP check was made to fail once: `python src/validate.py --selftest` (temporary copy: deleted one cleaned weather row; set one baro altitude to -999; made one cleaned wind speed differ from its raw value; pointed one cleaned state at a non-existent aircraft).
+
+Output of `python src/clean.py` (identical on a second run):
+
+```text
+aircraft_state_clean: 3009 rows (raw: 3009)
+  flags per column:
+  latitude         ok 3009
+  longitude        ok 3009
+  baro_altitude    ok 2818, missing_on_ground 169, altitude_mismatch 18, missing_not_reported 2, invalid_sentinel 2
+  geo_altitude     ok 2797, missing_on_ground 176, missing_not_reported 18, altitude_mismatch 18
+  velocity         ok 3008, invalid_range 1
+  vertical_rate    ok 2840, missing_on_ground 167, invalid_range 1, missing_not_reported 1
+  callsign         trimmed 2934, missing_empty 71, ok 4
+  squawk           ok 2250, missing_not_reported 759
+weather_hourly_clean: 1920 rows (raw: 1920)
+  flags per column:
+  wind_speed_10m   ok 1920
+  wind_gusts_10m   ok 1832, unusual_high 82, stuck_value 6
+  precipitation    ok 1920
+  showers          ok 1920
+  cape             ok 1914, unusual_high 6
+  flags other than 'ok' per location:
+  ADB   wind_gusts_10m:unusual_high 4
+  AYT   cape:unusual_high 6, wind_gusts_10m:unusual_high 27
+  ESB   wind_gusts_10m:stuck_value 6, wind_gusts_10m:unusual_high 43
+  IST   wind_gusts_10m:unusual_high 5
+  SAW   wind_gusts_10m:unusual_high 3
+mappings: location_airport 5 rows
+M2 tables unchanged: yes (hashes equal before and after)
+foreign_key_check: OK
+STATUS: COMPLETE
+```
+
+Output of `python src/validate.py`:
+
+```text
+PASS  cleaned tables have the row count of their raw tables                    aircraft_state_clean = 3009, weather_hourly_clean = 1920
+PASS  no impossible value survives in a cleaned column                         9 rules, 0 violations
+PASS  no imputation: every cleaned value equals its raw value                  0 differing values
+PASS  foreign_key_check                                                        OK
+PASS  weather: NULL share per location at most 5%                              worst share 1.6%
+PASS  airborne states keep a usable baro altitude (at least 95%)               99.3% of 2833 airborne states
+PASS  every location has weather up to the most recent hour in the database    5 of 5 locations, newest hour 2026-11-03T23:00Z
+PASS  newest raw retrieval is at most 48 h old                                 newest 2026-11-03T08:34:44Z (0.4 h ago)
+WARN  no stuck_value flags (wind repeated 6 h)                                 6
+WARN  no altitude_mismatch flags (baro vs geo contradict)                      18
+PASS  no emergency squawk codes (7500/7600/7700)                               0
+PASS  no quarantined records                                                   0
+12 checks: 10 PASS, 2 WARN, 0 STOP
+STATUS: COMPLETE
+```
+
+Both WARNs are problems in the measurement, not in our pipeline: `stuck_value` (6 gust hours at ESB, a model product so quantisation is plausible, I-10) and `altitude_mismatch` (18 ADS-B states, I-08). Neither stops the pipeline.
+
+How each STOP check was made to fail once (`python src/validate.py --selftest`, on a temporary copy of the database):
+
+```text
+selftest row counts         -> STOP  weather_hourly_clean 1919 != weather_hourly 1920
+selftest impossible value   -> STOP  altitude out of range: 1, altitudes contradict: 1
+selftest no imputation      -> STOP  weather_hourly_clean: 1 rows
+selftest foreign_key_check  -> STOP  1 violations
+SELFTEST OK: every STOP check fails when it should
+```
 
 ## 8. What we can't say
-TODO. Starting points: forecast vs observed weather is not separated (I-15); only 4 days of weather and 4 snapshots (I-13); the cause of altitude contradictions and missing squawks is unknown; the 0.25 degree box used to link aircraft to airports is an approximation.
+
+- Weather after the retrieval time is forecast, not observation, and we cannot separate the two in the database (I-20).
+- Aircraft data are 16 daytime snapshots on 10 days, not a continuous record, and weather has gaps on 10-18 and 28-29 Oct: no trends, and nothing about night.
+- The causes of the airborne missing values, the missing squawks, the 10 large altitude contradictions and the one impossible speed are unknown.
+- `unusual_high` for gusts means "unusual for that airport over the whole period", not "a storm": at ESB it mostly marks the daily afternoon peak. M4 should use a time-of-day-aware or absolute threshold for storm hours, and can rely on 27 Oct as the one clear event.
+- The `ALT_GAP_MAX_M`, `STUCK_RUN` and sentinel decisions rest on a handful of rows; with more data we would revisit them.
+- Linking aircraft to airports by a 0.25 degree box is an approximation, and the weather grid point is 2.5-5 km from the airport.
