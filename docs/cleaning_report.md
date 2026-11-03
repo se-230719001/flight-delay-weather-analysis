@@ -104,6 +104,7 @@ Why this order: a missing value is recorded first because nothing else can be sa
 - `STUCK_RUN = 6`: the longest identical runs other than the flagged one are 5 hours (wind speed at ESB, gusts at AYT), so 6 is the smallest value that flags only the one outlying run. It is borderline: with 7 nothing is flagged.
 - `ROBUST_Z_THRESHOLD = 3.5`: the usual cut-off for the median/MAD score; it flags 82 gust hours, 37 of them ordinary daytime gusts at ESB, so it over-flags at a calm airport (I-11). Raising it to 5 would keep mainly the 27 Oct event.
 - `CAPE_UNUSUAL_JKG = 1000`: CAPE is zero most hours so IQR and MAD cannot be used; 1,000 J/kg is the conventional start of strong instability. It flags only the 6 Antalya hours.
+- `MAPPING_FILES`: not a threshold, only the name of the mapping CSV in `data/mappings/`.
 - `UNUSABLE_SHARE_MAX = 0.05`, `AIRBORNE_ALT_USABLE_MIN = 0.95`, `FRESHNESS_HOURS = 48`: warning levels chosen above today's values (worst NULL share 1.6%, airborne usable share 99.3%, ingestion run by hand every few days); they are guesses about what counts as healthy, not findings.
 
 ## 6. Mapping and identity decisions
