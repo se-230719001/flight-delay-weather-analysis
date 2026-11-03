@@ -114,11 +114,13 @@ def missing_flag(raw, on_ground, ground_explains):
 
 
 def altitude_flags(baro, geo, on_ground):
-    """baro and geo altitude: missing -> invalid range -> the two contradict each other."""
+    """baro and geo altitude: missing -> invalid (range, sentinel) -> the two contradict each other."""
     fb = missing_flag(baro, on_ground, True)
     fg = missing_flag(geo, on_ground, True)
     if fb is None and not (cfg.ALT_MIN_M <= baro <= cfg.ALT_MAX_M):
         fb = "invalid_range"
+    elif fb is None and abs(baro - cfg.SENTINEL_BARO_M) < 0.05:
+        fb = "invalid_sentinel"   # -1000 ft: a placeholder, not a measurement
     if fg is None and not (cfg.ALT_MIN_M <= geo <= cfg.ALT_MAX_M):
         fg = "invalid_range"
     if fb is None and fg is None and abs(geo - baro) > cfg.ALT_GAP_MAX_M:

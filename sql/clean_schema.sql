@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS aircraft_state_clean (
     baro_altitude      REAL,
     baro_altitude_flag TEXT NOT NULL CHECK (baro_altitude_flag IN (
         'ok', 'missing_on_ground', 'missing_not_reported', 'invalid_range',
-        'altitude_mismatch')),
+        'invalid_sentinel', 'altitude_mismatch')),
     geo_altitude_raw   REAL,
     geo_altitude       REAL,
     geo_altitude_flag  TEXT NOT NULL CHECK (geo_altitude_flag IN (

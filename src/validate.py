@@ -32,6 +32,8 @@ IMPOSSIBLE_SQL = {
     "altitude out of range": ("SELECT COUNT(*) FROM aircraft_state_clean WHERE baro_altitude < ? OR baro_altitude > ? "
                               "OR geo_altitude < ? OR geo_altitude > ?",
                               (cfg.ALT_MIN_M, cfg.ALT_MAX_M, cfg.ALT_MIN_M, cfg.ALT_MAX_M)),
+    "baro altitude equals the -1000 ft sentinel": ("SELECT COUNT(*) FROM aircraft_state_clean WHERE ABS(baro_altitude - ?) < 0.05",
+                                                   (cfg.SENTINEL_BARO_M,)),
     "negative velocity": ("SELECT COUNT(*) FROM aircraft_state_clean WHERE velocity < ? OR velocity > ?",
                           (0.0, cfg.VELOCITY_MAX_MS)),
     "altitudes contradict": ("SELECT COUNT(*) FROM aircraft_state_clean WHERE ABS(geo_altitude - baro_altitude) > ?",
