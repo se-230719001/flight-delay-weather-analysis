@@ -38,3 +38,11 @@ CAPE_UNUSUAL_JKG = 1000.0         # CAPE is 0 most hours, so IQR and MAD are 0 a
 
 # --- Mapping files ------------------------------------------------------------
 MAPPING_FILES = {"location_airport": "location_airport.csv"}   # in data/mappings/
+
+# --- validate.py: thresholds for the WARN checks --------------------------------
+UNUSABLE_SHARE_MAX = 0.05         # a weather variable may be NULL in at most 5% of a location's hours;
+                                  # profile: 0% missing, so anything above 5% is a real change
+AIRBORNE_ALT_USABLE_MIN = 0.95    # at least 95% of airborne states should keep a usable baro altitude;
+                                  # profile: 99.9%
+FRESHNESS_HOURS = 48              # the newest raw retrieval should be at most this old (we fetch by
+                                  # hand until M5 automates it)
