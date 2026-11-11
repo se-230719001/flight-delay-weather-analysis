@@ -136,12 +136,15 @@ flight-delay-weather-analysis/
 │   ├── mappings/        # M3: decisions stored as data (location_airport.csv)
 │   └── flights.db       # SQLite database built by load.py and clean.py (derived, not committed)
 ├── notebooks/
-│   └── m3_profile.ipynb # M3: profile of the M2 tables, committed with outputs
+│   ├── m3_profile.ipynb # M3: profile of the M2 tables, committed with outputs
+│   └── m4_eda.ipynb     # M4: exploratory analysis (read-only database), committed with outputs
+├── figures/             # M4: figures written by the notebook (fig01-fig07)
 ├── sql/
 │   ├── schema.sql       # M2: tables (STRICT), keys and constraints; safe to run repeatedly
 │   ├── clean_schema.sql # M3: cleaned tables (raw / cleaned / flag columns) and mapping table
 │   └── queries/
-│       └── 01_wind_and_nearby_traffic.sql   # Analytical query (grain stated in the file)
+│       ├── 01_wind_and_nearby_traffic.sql   # Analytical query (grain stated in the file)
+│       └── 02-06 *.sql                      # M4: traffic grid, weather hours, coverage, raw-versus-clean key number
 ├── src/
 │   ├── ingest.py        # M1: extraction, retries, and logging (lands raw files)
 │   ├── db.py            # M2: connect() (foreign_keys = ON) and shared helpers
@@ -149,10 +152,13 @@ flight-delay-weather-analysis/
 │   ├── checks.py        # M2: six checks run against a temporary copy of the database
 │   ├── clean.py         # M3: builds the cleaned layer from the M2 tables (idempotent, atomic)
 │   ├── clean_config.py  # M3: every threshold and constant, with its reason
-│   └── validate.py      # M3: data-quality expectations as code (PASS / WARN / STOP)
+│   ├── validate.py      # M3: data-quality expectations as code (PASS / WARN / STOP)
+│   └── explore.py       # M4: helpers the notebook imports (read-only connection, bootstrap, correlation, figures)
+├── tests/               # unit tests for the helpers and an end-to-end run of the notebook
 └── docs/
     ├── sources.md       # Data source cards detailing schema, licensing, and known issues
-    └── cleaning_report.md  # M3: issues register, rules, decisions, counts, limits
+    ├── cleaning_report.md  # M3: issues register, rules, decisions, counts, limits
+    └── eda_report.md       # M4: what exploration found, how sure we are, what would change it
 ```
 
 ## Data Model
@@ -326,9 +332,24 @@ python src/clean.py
 python src/validate.py
 ```
 
+## Exploration
+
+![Windy versus calm](figures/fig04_windy_vs_calm.png)
+
+In 79 usable snapshot-airport rows from 16 ADS-B snapshots on 10 local days we found **no detectable link between gusts and airborne traffic** (exploratory): windy minus calm is +0.41 aircraft, 95% interval [-0.77, +1.80], and the Spearman correlation is +0.14. The weather side is firmer: gusts are right-skewed, peak between 15:00 and 18:00 local time, and the choice of flag filter changes the tail and the coverage at Ankara and Antalya. Snapshots exist only between 11:34 and 22:38 local time and about 49 comparisons were looked at, so every traffic finding is labelled exploratory; the findings table, the limits and the questions for modelling are in [docs/eda_report.md](docs/eda_report.md).
+
+Reproduce everything from a fresh clone with landed raw data:
+
+```bash
+python src/load.py
+python src/clean.py
+python src/validate.py
+jupyter nbconvert --to notebook --execute --inplace notebooks/m4_eda.ipynb
+```
+
 ## Status
 
-M3 — cleaned layer and quality report complete.
+M4 — exploratory analysis complete.
 
 ## Team
 
