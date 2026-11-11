@@ -1,4 +1,4 @@
-"""Phase 2 tests: analysis helpers in src/explore.py and the notebook notebooks/m4_exploration.ipynb.
+"""Phase 2 tests: analysis helpers in src/explore.py and the notebook notebooks/m4_eda.ipynb.
 
 Run: python -m unittest discover tests
 The notebook is executed cell by cell in plain Python (no Jupyter needed) against the real
@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 import explore  # noqa: E402
 
-NOTEBOOK = ROOT / "notebooks" / "m4_exploration.ipynb"
+NOTEBOOK = ROOT / "notebooks" / "m4_eda.ipynb"
 
 
 # --- helpers --------------------------------------------------------------------------
@@ -161,15 +161,18 @@ class TestNotebookStructure(unittest.TestCase):
         self.assertIn("db_fingerprint(", cells[0])
         self.assertIn("assert_unchanged(", cells[-1])
 
-    def test_committed_notebook_carries_no_stale_outputs(self):
+    def test_committed_notebook_has_no_error_outputs(self):
+        # M4 requires the notebook to be committed WITH its outputs; an output that is an
+        # error means it was saved from a failed run (for example on an empty database).
         for c in load_notebook()["cells"]:
             if c["cell_type"] == "code":
-                self.assertEqual(c["outputs"], [])
+                for out in c["outputs"]:
+                    self.assertNotEqual(out.get("output_type"), "error", msg="".join(c["source"])[:60])
 
     def test_every_figure_goes_through_save_fig(self):
         for src in code_cells(load_notebook()):
             self.assertNotIn("savefig(", src)                   # save_fig adds the caption
-            if "plt.subplots" in src:
+            if "plt.subplots" in src and "not saved to figures/" not in src:   # trial plots are marked
                 self.assertIn("explore.save_fig(", src)
 
 
@@ -185,7 +188,7 @@ class TestNotebookRuns(unittest.TestCase):
         os.chdir(NOTEBOOK.parent)
         buf = io.StringIO()
         try:
-            ns = {"__name__": "__main__"}
+            ns = {"__name__": "__main__", "display": lambda *args, **kwargs: None}   # Jupyter provides display()
             with contextlib.redirect_stdout(buf):
                 for i, src in enumerate(code_cells(load_notebook())):
                     exec(compile(ast.parse(src), f"cell{i}", "exec"), ns)
@@ -206,7 +209,9 @@ class TestNotebookRuns(unittest.TestCase):
             self.assertIn("identical before and after", out)
             self.assertEqual(sorted(p.name for p in Path(tmp).glob("*.png")),
                              ["fig01_weather_coverage.png", "fig02_traffic_by_local_hour.png",
-                              "fig03_traffic_vs_gust.png", "fig04_windy_vs_calm.png"])
+                              "fig03_traffic_vs_gust.png", "fig04_windy_vs_calm.png",
+                              "fig05_gust_shape.png", "fig06_time_scales.png",
+                              "fig07_composition_windy_calm.png"])
         # the traffic grid inside the notebook is complete: snapshots x airports
         traffic = ns["traffic"]
         self.assertEqual(len(traffic), traffic.snapshot.nunique() * traffic.iata.nunique())

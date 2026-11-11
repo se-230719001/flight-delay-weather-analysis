@@ -1,4 +1,4 @@
-"""Phase 1 tests for src/explore.py and sql/queries/02-04. Run: python -m unittest discover tests"""
+"""Phase 1 tests for src/explore.py and sql/queries/02-06. Run: python -m unittest discover tests"""
 
 import re
 import sqlite3
@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -311,6 +312,87 @@ class TestRealDatabase(unittest.TestCase):
         explore.query_df(self.con, "03_weather_hours_clean", explore.flag_params(("ok",)))
         explore.query_df(self.con, "04_coverage_weather", explore.flag_params(("ok",)))
         self.assertEqual(before, explore.db_fingerprint(self.con))
+
+
+def add_raw_weather(con, loc, hour, gust, retrieved):
+    con.execute("INSERT INTO weather_hourly VALUES (?,?,?,?,?,?,?,?)",
+                (loc, hour, 10.0, gust, 0.0, 0.0, 0.0, retrieved))
+
+
+class TestRawVersusCleanQueries(unittest.TestCase):
+    """Queries 05 (raw M2 table) and 06 (cleaned layer): the 2.1 key number."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.con = make_db(Path(self._tmp.name) / "t.db")
+        retrieved = "2026-10-20T10:07:07Z"
+        hours = [("2026-10-20T08:00Z", 20.0, "ok"), ("2026-10-20T09:00Z", 40.0, "unusual_high"),
+                 ("2026-10-20T10:00Z", 30.0, "ok"), ("2026-10-20T11:00Z", 90.0, "ok")]   # last one: forecast
+        with self.con:
+            for hour, gust, flag in hours:
+                add_raw_weather(self.con, 1, hour, gust, retrieved)
+                add_weather(self.con, 1, hour, gust, flag, retrieved)
+
+    def tearDown(self):
+        self.con.close()
+        self._tmp.cleanup()
+
+    def overall(self, df):
+        return df.set_index("iata").loc["ALL"]
+
+    def test_raw_keeps_every_hour_and_every_value(self):
+        raw = self.overall(explore.query_df(self.con, "05_gust_mean_raw", {"observed_only": 0}))
+        self.assertEqual((raw.n_hours, raw.n_gust, raw.mean_gust_kmh), (4, 4, 45.0))   # (20+40+30+90)/4
+
+    def test_raw_without_forecast_hours(self):
+        obs = self.overall(explore.query_df(self.con, "05_gust_mean_raw", {"observed_only": 1}))
+        self.assertEqual((obs.n_hours, obs.mean_gust_kmh), (3, 30.0))                  # (20+40+30)/3
+
+    def test_clean_filter_changes_the_mean_and_keeps_the_denominator(self):
+        strict = self.overall(explore.query_df(self.con, "06_gust_mean_clean", explore.flag_params(("ok",))))
+        wide = self.overall(explore.query_df(self.con, "06_gust_mean_clean",
+                                             explore.flag_params(("ok", "unusual_high"))))
+        self.assertEqual((strict.n_hours, strict.n_gust, strict.mean_gust_kmh), (3, 2, 25.0))
+        self.assertEqual((wide.n_hours, wide.n_gust, wide.mean_gust_kmh), (3, 3, 30.0))
+
+    def test_per_airport_row_and_no_formatted_values_in_sql(self):
+        df = explore.query_df(self.con, "05_gust_mean_raw", {"observed_only": 0})
+        self.assertEqual(sorted(df.iata), ["AAA", "ALL"])
+        for name in ("05_gust_mean_raw", "06_gust_mean_clean"):
+            sql = explore.load_sql(name)
+            self.assertNotIn("{", sql)
+            self.assertNotIn("%s", sql)
+
+
+class TestCorrelation(unittest.TestCase):
+    def test_pearson_and_spearman_on_a_monotone_but_curved_relation(self):
+        x = list(range(1, 11))
+        y = [v ** 3 for v in x]
+        self.assertAlmostEqual(explore.correlation(x, x), 1.0)
+        self.assertAlmostEqual(explore.correlation(x, y, "spearman"), 1.0)
+        self.assertLess(explore.correlation(x, y, "pearson"), 1.0)
+
+    def test_undefined_cases_are_nan(self):
+        self.assertTrue(np.isnan(explore.correlation([1, 1, 1, 1], [1, 2, 3, 4])))
+        self.assertTrue(np.isnan(explore.correlation([1, 2], [1, 2])))
+        self.assertTrue(np.isnan(explore.correlation([1, 2, None, 4, 5], [1, 2, 3, None, None])))
+
+    def test_unknown_method_raises(self):
+        with self.assertRaises(ValueError):
+            explore.correlation([1, 2, 3], [1, 2, 3], "kendall")
+
+    def test_bootstrap_corr_is_reproducible_and_counts_units(self):
+        rng = np.random.default_rng(0)
+        df = pd.DataFrame({"day": np.repeat(list("abcdefgh"), 5), "x": rng.normal(size=40)})
+        df["y"] = df.x * 2 + rng.normal(scale=0.1, size=40)
+        r1 = explore.bootstrap_corr(df, "day", "x", "y", n_boot=200, seed=3)
+        r2 = explore.bootstrap_corr(df, "day", "x", "y", n_boot=200, seed=3)
+        self.assertEqual(r1, r2)
+        r, lo, hi, n = r1
+        self.assertEqual(n, 8)
+        self.assertGreater(r, 0.95)
+        self.assertLessEqual(lo, r + 1e-9)
+        self.assertGreaterEqual(hi, r - 1e-9)
 
 
 if __name__ == "__main__":
