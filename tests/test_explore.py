@@ -51,9 +51,9 @@ def add_state(con, key, snapshot, lat, lon, on_ground=0, velocity=200.0, vflag="
 
 def add_weather(con, loc, hour, gust, flag, retrieved):
     con.execute(
-        """INSERT INTO weather_hourly_clean VALUES (?,?, ?,?,?, ?,?,?, ?,?,?, ?,?,?, ?,?,?, ?)""",
+        """INSERT INTO weather_hourly_clean VALUES (?,?, ?,?,?, ?,?,?, ?,?,?, ?,?,?, ?,?,?, ?, ?)""",
         (loc, hour, 10.0, 10.0, "ok", gust, gust, flag, 0.0, 0.0, "ok", 0.0, 0.0, "ok",
-         0.0, 0.0, "ok", retrieved))
+         0.0, 0.0, "ok", retrieved, 0))
 
 
 class TestConnection(unittest.TestCase):

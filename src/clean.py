@@ -77,8 +77,8 @@ INSERT INTO weather_hourly_clean (
     wind_gusts_10m_raw, wind_gusts_10m, wind_gusts_10m_flag,
     precipitation_raw, precipitation, precipitation_flag,
     showers_raw, showers, showers_flag,
-    cape_raw, cape, cape_flag, retrieved_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    cape_raw, cape, cape_flag, retrieved_at, is_forecast)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 KEEP_FLAGS = {"ok", "unusual_high", "emergency_code", "trimmed"}   # flagged but value kept
@@ -184,6 +184,22 @@ def hour(text):
     return datetime.strptime(text, "%Y-%m-%dT%H:%MZ")
 
 
+def is_forecast(observed_at, retrieved_at):
+    """I-20: 1 if the weather hour is later than the file that supplied it, else 0.
+    The two texts have different formats ('...T10:00Z' and '...T10:07:07Z'), so both are
+    parsed; a plain text comparison could be wrong."""
+    retrieved = None
+    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%MZ"):
+        try:
+            retrieved = datetime.strptime(retrieved_at, fmt)
+            break
+        except ValueError:
+            continue
+    if retrieved is None:
+        raise CleanError("unparseable retrieved_at: %r" % retrieved_at)
+    return 1 if hour(observed_at) > retrieved else 0
+
+
 def find_stuck(rows, column):
     """Keys (location_key, observed_at) inside a run of >= STUCK_RUN identical non-zero
     values in consecutive hours. Zero is excluded: calm weather legitimately repeats 0."""
@@ -257,7 +273,8 @@ def clean_weather_rows(rows):
         row = (r["location_key"], r["observed_at"])
         for col in WEATHER_COLUMNS:
             row += (r[col], cleaned(r[col], flags[col]), flags[col])
-        out.append((row + (r["retrieved_at"],), flags, r["location_key"]))
+        forecast = is_forecast(r["observed_at"], r["retrieved_at"])
+        out.append((row + (r["retrieved_at"], forecast), flags, r["location_key"]))
     return out
 
 
@@ -355,6 +372,8 @@ def run(db_path=None):
     print_flag_table("  flags per column:", count_flags([f for _, f in state_out], STATE_COLUMNS))
     print("weather_hourly_clean: %d rows (raw: %d)" % (counts["weather_hourly_clean"], counts["weather_hourly"]))
     print_flag_table("  flags per column:", count_flags([f for _, f, _ in weather_out], WEATHER_COLUMNS))
+    print("  forecast hours (is_forecast = 1): %d of %d"
+          % (sum(row[-1] for row, _, _ in weather_out), len(weather_out)))
     print("  flags other than 'ok' per location:")
     per_loc = {}
     for _, flags, loc in weather_out:

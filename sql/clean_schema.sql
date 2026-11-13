@@ -84,6 +84,9 @@ CREATE TABLE IF NOT EXISTS weather_hourly_clean (
     cape_flag           TEXT NOT NULL CHECK (cape_flag IN (
         'ok', 'missing_not_reported', 'invalid_range', 'unusual_high')),
     retrieved_at        TEXT NOT NULL,
+    -- I-20: 1 when the hour is later than the retrieval that supplied it (a forecast, not an
+    -- observation); 0 otherwise. Added in M4. Every analysis of observed weather needs is_forecast = 0.
+    is_forecast         INTEGER NOT NULL CHECK (is_forecast IN (0, 1)),
     PRIMARY KEY (location_key, observed_at)
 ) STRICT;
 

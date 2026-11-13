@@ -44,6 +44,10 @@ ROBUST_Z_THRESHOLD = 3.5          # per-location robust z-score (median and MAD)
 CAPE_UNUSUAL_JKG = 1000.0         # CAPE is 0 most hours, so IQR and MAD are 0 and cannot be used;
                                   # above 1,000 J/kg is conventionally 'strong instability'
 
+# --- Analysis rules shared with M4/M5/M7 queries (not used to change any cleaned value) ----
+MIN_AIRBORNE_SPEED = 3            # aircraft; a mean airborne speed over fewer aircraft is noise (I-21):
+                                  # M4 found 20 of 66 snapshot-airport means resting on 1-2 aircraft
+
 # --- Mapping files ------------------------------------------------------------
 MAPPING_FILES = {"location_airport": "location_airport.csv"}   # in data/mappings/
 
