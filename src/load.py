@@ -7,13 +7,14 @@ Properties: idempotent (upserts, latest retrieved_at wins), atomic (one transact
 parameterised (no values formatted into SQL), honest (run summary at the end).
 """
 
+import argparse
 import hashlib
 import json
 import math
 import sys
 from pathlib import Path
 
-from db import (DB_PATH, ROOT, connect, epoch_to_iso, init_schema,
+from db import (DB_PATH, ROOT, add_run_time_argument, connect, epoch_to_iso, init_schema,
                 meteo_time_to_iso, retrieved_at_from_filename)
 
 RAW_DIR = ROOT / "data" / "raw"
@@ -25,7 +26,7 @@ INSERT INTO aircraft (icao24, origin_country, retrieved_at) VALUES (?, ?, ?)
 ON CONFLICT (icao24) DO UPDATE SET
     origin_country = excluded.origin_country,
     retrieved_at   = excluded.retrieved_at
-WHERE excluded.retrieved_at >= aircraft.retrieved_at
+WHERE excluded.retrieved_at > aircraft.retrieved_at
 """
 UPSERT_STATE = """
 INSERT INTO aircraft_state (aircraft_key, time_position, last_contact, callsign, longitude,
@@ -41,7 +42,7 @@ ON CONFLICT (aircraft_key, time_position) DO UPDATE SET
     squawk = excluded.squawk, spi = excluded.spi,
     position_source = excluded.position_source, category = excluded.category,
     snapshot_time = excluded.snapshot_time, retrieved_at = excluded.retrieved_at
-WHERE excluded.retrieved_at >= aircraft_state.retrieved_at
+WHERE excluded.retrieved_at > aircraft_state.retrieved_at
 """
 UPSERT_LOCATION = """
 INSERT INTO location (location_index, latitude, longitude, elevation, retrieved_at)
@@ -49,7 +50,7 @@ VALUES (?, ?, ?, ?, ?)
 ON CONFLICT (location_index) DO UPDATE SET
     latitude = excluded.latitude, longitude = excluded.longitude,
     elevation = excluded.elevation, retrieved_at = excluded.retrieved_at
-WHERE excluded.retrieved_at >= location.retrieved_at
+WHERE excluded.retrieved_at > location.retrieved_at
 """
 UPSERT_WEATHER = """
 INSERT INTO weather_hourly (location_key, observed_at, wind_speed_10m, wind_gusts_10m,
@@ -59,7 +60,7 @@ ON CONFLICT (location_key, observed_at) DO UPDATE SET
     wind_speed_10m = excluded.wind_speed_10m, wind_gusts_10m = excluded.wind_gusts_10m,
     precipitation = excluded.precipitation, showers = excluded.showers,
     cape = excluded.cape, retrieved_at = excluded.retrieved_at
-WHERE excluded.retrieved_at >= weather_hourly.retrieved_at
+WHERE excluded.retrieved_at > weather_hourly.retrieved_at
 """
 INSERT_QUARANTINE = """
 INSERT INTO quarantine (source, reason, record_hash, raw_record, retrieved_at)
@@ -284,7 +285,7 @@ def run(db_path=None, raw_dir=None):
     aircraft, states = parse_opensky(sky_files, stats)
     locations, weather = parse_openmeteo(meteo_files, stats)
 
-    con = connect(db_path)
+    con = connect(db_path, create=True)   # load.py builds the database
     try:
         init_schema(con)
         before = counts(con)
@@ -309,6 +310,9 @@ def run(db_path=None, raw_dir=None):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Load landed raw files into the M2 tables.")
+    add_run_time_argument(parser)
+    parser.parse_args()   # --run-time is accepted for the runner; loading is a full reload
     try:
         return run()
     except Exception as exc:   # nothing from this run was written
