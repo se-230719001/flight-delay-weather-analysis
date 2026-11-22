@@ -309,6 +309,7 @@ def run(db_path=None, raw_dir=None):
     return 0 if not fk_problems else 1
 
 
+
 def main():
     parser = argparse.ArgumentParser(description="Load landed raw files into the M2 tables.")
     add_run_time_argument(parser)
@@ -320,6 +321,7 @@ def main():
         print("nothing was written to the database")
         print("STATUS: FAILED")
         return 1
+
 
 
 if __name__ == "__main__":
