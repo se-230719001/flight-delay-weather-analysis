@@ -21,7 +21,7 @@ PARAMS_TRAFFIC = {"radius_deg": 0.25, "lon_scale": 0.76}
 
 def make_db(path):
     """A tiny database with the real schemas: two airports 0.4 deg apart in longitude."""
-    con = db.connect(path)
+    con = db.connect(path, create=True)
     db.init_schema(con)
     db.init_clean_schema(con)
     with con:
