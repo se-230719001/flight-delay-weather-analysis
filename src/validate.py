@@ -9,6 +9,7 @@ STOP check fails. WARNs never stop the pipeline but are printed on every run.
 """
 
 import shutil
+import statistics
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -168,6 +169,36 @@ def check_coverage(con):
 RUN_TIME = None   # set by main(): the pipeline's clock (never the wall clock)
 
 
+VOLUME_WINDOW_MINUTES = 30   # "this run" = states retrieved in the 30 min before the run time
+VOLUME_MIN_BATCHES = 5       # need this many earlier retrievals to know what is typical
+VOLUME_FACTOR = 10           # more than 10x the typical retrieval is suspicious
+BATCH_SIZES_SQL = "SELECT retrieved_at, COUNT(*) FROM aircraft_state GROUP BY retrieved_at ORDER BY retrieved_at"
+
+
+def check_volume(con):
+    """Rows this run added compared with a typical run. Zero, or 10x the usual, is a WARN.
+    (A --skip-ingest rebuild fetches nothing, so it legitimately shows zero.)"""
+    name = "aircraft states retrieved this run are in line with a typical run"
+    run_time = RUN_TIME or resolve_run_time(None)
+    window_start = run_time - timedelta(minutes=VOLUME_WINDOW_MINUTES)
+    this_run, earlier = 0, []
+    for retrieved_at, n in con.execute(BATCH_SIZES_SQL).fetchall():
+        when = datetime.strptime(retrieved_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        if window_start < when <= run_time:
+            this_run += n
+        elif when <= window_start:
+            earlier.append(n)
+    if len(earlier) < VOLUME_MIN_BATCHES:
+        return "PASS", name, "only %d earlier retrievals: no baseline yet" % len(earlier)
+    typical = statistics.median(earlier)
+    detail = "%d states this run, typical %d per retrieval" % (this_run, typical)
+    if this_run == 0:
+        return "WARN", name, detail + " (nothing retrieved in the %d min before the run time)" % VOLUME_WINDOW_MINUTES
+    if this_run > VOLUME_FACTOR * typical:
+        return "WARN", name, detail + " (more than %dx the typical run)" % VOLUME_FACTOR
+    return "PASS", name, detail
+
+
 def check_freshness(con):
     """Freshness is measured from the run time, so a whole feed that stopped is visible."""
     newest = scalar(con, NEWEST_RETRIEVAL)
@@ -189,7 +220,7 @@ def count_check(sql, label, extra=""):
 
 
 STOP_CHECKS = [check_row_counts, check_impossible, check_no_imputation, check_foreign_keys]
-WARN_CHECKS = [check_unusable_share, check_airborne_altitude, check_coverage, check_freshness,
+WARN_CHECKS = [check_unusable_share, check_airborne_altitude, check_coverage, check_freshness, check_volume,
                count_check(COUNT_STUCK, "stuck_value flags (wind repeated %d h)" % cfg.STUCK_RUN),
                count_check(COUNT_ALTITUDE_MISMATCH, "altitude_mismatch flags (baro vs geo contradict)"),
                count_check(COUNT_EMERGENCY, "emergency squawk codes (7500/7600/7700)"),
