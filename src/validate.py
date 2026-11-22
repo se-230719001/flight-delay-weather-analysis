@@ -212,6 +212,25 @@ def check_freshness(con):
                                                             format_run_time(run_time))
 
 
+COUNT_AIRBORNE_STATES = "SELECT COUNT(*) FROM aircraft_state_clean"
+COUNT_WEATHER_ROWS = "SELECT COUNT(*) FROM weather_hourly_clean"
+# Flags are the RESULT of cleaning (the full history is re-flagged every run), so their count
+# never reaches zero. A WARN that fires on every run is never read; these warn only when a
+# flag becomes unusually common, which would mean a sensor or feed problem. Today: 0.6% and 0.1%.
+MAX_ALTITUDE_MISMATCH_SHARE = 0.02
+MAX_STUCK_SHARE = 0.01
+
+
+def share_check(sql, total_sql, label, max_share):
+    def check(con):
+        n, total = scalar(con, sql), scalar(con, total_sql)
+        share = n / total if total else 0.0
+        return (("PASS" if share <= max_share else "WARN"),
+                "%s are at most %.0f%% of rows" % (label, max_share * 100),
+                "%d of %d (%.2f%%)" % (n, total, share * 100))
+    return check
+
+
 def count_check(sql, label, extra=""):
     def check(con):
         n = scalar(con, sql)
@@ -221,8 +240,10 @@ def count_check(sql, label, extra=""):
 
 STOP_CHECKS = [check_row_counts, check_impossible, check_no_imputation, check_foreign_keys]
 WARN_CHECKS = [check_unusable_share, check_airborne_altitude, check_coverage, check_freshness, check_volume,
-               count_check(COUNT_STUCK, "stuck_value flags (wind repeated %d h)" % cfg.STUCK_RUN),
-               count_check(COUNT_ALTITUDE_MISMATCH, "altitude_mismatch flags (baro vs geo contradict)"),
+               share_check(COUNT_STUCK, COUNT_WEATHER_ROWS,
+                           "stuck_value flags (wind repeated %d h)" % cfg.STUCK_RUN, MAX_STUCK_SHARE),
+               share_check(COUNT_ALTITUDE_MISMATCH, COUNT_AIRBORNE_STATES,
+                           "altitude_mismatch flags (baro vs geo contradict)", MAX_ALTITUDE_MISMATCH_SHARE),
                count_check(COUNT_EMERGENCY, "emergency squawk codes (7500/7600/7700)"),
                count_check(COUNT_QUARANTINE, "quarantined records")]
 
