@@ -12,3 +12,8 @@ __pycache__/
 data/raw/*/*
 !data/raw/*/.gitkeep
 data/*.db
+
+# M5: run log, cron/Task Scheduler output, lock file
+data/pipeline_log.db
+logs/
+data/pipeline.lock
