@@ -10,9 +10,19 @@ Sources:
 Responses are saved byte-for-byte as received (no parsing, cleaning or renaming).
 Files are never overwritten: every run creates new timestamped files.
 All configuration and credentials come from environment variables (.env supported).
+
+M5 - the run heals itself after missed runs (python src/ingest.py [--run-time 2026-11-20T08:10Z]):
+    - Open-Meteo: asks for everything since the last landed file, plus an overlap
+      (past_days = ceil((hours since last retrieval + OVERLAP_HOURS) / 24), at most 92 days,
+      which is all the API can give). A machine that was off for a day catches up in one run.
+    - OpenSky: /states/all is a live snapshot with no history, so a missed period can NOT be
+      recovered. The run says so loudly (WARN naming the gap); src/monitor.py raises the ALARM.
+Exit codes: 0 all sources fetched, 1 a source failed, 2 authentication failed.
 """
 
+import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -21,6 +31,9 @@ from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
+
+from db import (add_run_time_argument, format_run_time, resolve_run_time,
+                retrieved_at_from_filename)
 
 load_dotenv()
 
@@ -53,8 +66,16 @@ OPENMETEO_HOURLY = os.environ.get(
     "OPENMETEO_HOURLY",
     "wind_speed_10m,wind_gusts_10m,precipitation,showers,cape",
 )
-OPENMETEO_PAST_DAYS = os.environ.get("OPENMETEO_PAST_DAYS", "1")
+OPENMETEO_PAST_DAYS = os.environ.get("OPENMETEO_PAST_DAYS", "1")   # minimum look-back
 OPENMETEO_FORECAST_DAYS = os.environ.get("OPENMETEO_FORECAST_DAYS", "1")
+
+# --- Self-healing (M5) -----------------------------------------------------------
+# Overlap re-fetched on top of the gap since the last retrieval, so late or revised values
+# are picked up again. PROVISIONAL: replace with the value your delay table justifies.
+OVERLAP_HOURS = float(os.environ.get("INGEST_OVERLAP_HOURS", "6"))
+MAX_PAST_DAYS = 92   # Open-Meteo's own limit for past_days: an outage longer than this loses data
+# OpenSky keeps no history: any gap longer than this is data that is gone for good.
+OPENSKY_MAX_GAP_HOURS = float(os.environ.get("OPENSKY_MAX_GAP_HOURS", "2"))
 
 
 class AuthError(Exception):
@@ -67,6 +88,24 @@ class FetchError(Exception):
 
 def utc_stamp():
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def last_retrieval(source):
+    """When did we last land a file for this source? None if never. The raw file names are
+    the record: a landed file means a successful retrieval."""
+    stamps = []
+    for path in (RAW_DIR / source).glob("*.json"):
+        try:
+            stamps.append(retrieved_at_from_filename(path))
+        except ValueError:
+            continue   # not one of ours
+    if not stamps:
+        return None
+    return datetime.strptime(max(stamps), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
+def hours_since(last, run_time):
+    return 0.0 if last is None else max(0.0, (run_time - last).total_seconds() / 3600)
 
 
 def log(msg):
@@ -171,7 +210,12 @@ def opensky_headers_and_auth(session):
     return {}, None
 
 
-def ingest_opensky(session):
+def ingest_opensky(session, run_time):
+    last = last_retrieval("opensky")
+    gap = hours_since(last, run_time)
+    if last is not None and gap > OPENSKY_MAX_GAP_HOURS:
+        log(f"  WARN opensky: no snapshot for {gap:.1f} h (last {last:%Y-%m-%dT%H:%MZ}). "
+            "OpenSky has no history: this period is lost for good.")
     try:
         lamin, lomin, lamax, lomax = [float(x) for x in OPENSKY_BBOX.split(",")]
     except ValueError:
@@ -190,7 +234,23 @@ def ingest_opensky(session):
 
 
 # --- Open-Meteo --------------------------------------------------------------
-def ingest_openmeteo(session):
+def meteo_past_days(run_time):
+    """How many whole days back to ask for: the gap since the last landed file plus the overlap."""
+    minimum = int(OPENMETEO_PAST_DAYS)
+    last = last_retrieval("openmeteo")
+    if last is None:
+        return minimum
+    needed = math.ceil((hours_since(last, run_time) + OVERLAP_HOURS) / 24)
+    if needed > MAX_PAST_DAYS:
+        log(f"  WARN openmeteo: last retrieval {last:%Y-%m-%dT%H:%MZ} is {needed} days back; "
+            f"the API only returns {MAX_PAST_DAYS}. Older hours are lost.")
+        return MAX_PAST_DAYS
+    return max(minimum, needed)
+
+
+def ingest_openmeteo(session, run_time):
+    past_days = meteo_past_days(run_time)
+    log(f"  openmeteo: asking for past_days={past_days}")
     try:
         coords = [tuple(float(v) for v in loc.split(",")) for loc in OPENMETEO_LOCATIONS.split(";")]
         if any(len(c) != 2 for c in coords):
@@ -201,7 +261,7 @@ def ingest_openmeteo(session):
         "latitude": ",".join(str(c[0]) for c in coords),
         "longitude": ",".join(str(c[1]) for c in coords),
         "hourly": OPENMETEO_HOURLY,
-        "past_days": OPENMETEO_PAST_DAYS,
+        "past_days": past_days,
         "forecast_days": OPENMETEO_FORECAST_DAYS,
         "timezone": "UTC",
     }
@@ -224,8 +284,10 @@ SOURCES = [
 
 
 def main():
-    started = datetime.now(timezone.utc)
-    log(f"Ingestion run started (UTC {started.strftime('%Y-%m-%dT%H:%M:%SZ')})")
+    parser = argparse.ArgumentParser(description="Land raw API responses in data/raw/.")
+    add_run_time_argument(parser)
+    run_time = resolve_run_time(parser.parse_args().run_time)
+    log(f"Ingestion run started (run time {format_run_time(run_time)})")
     results = []  # (source, status, detail)
     aborted = False
 
@@ -233,7 +295,7 @@ def main():
         for name, unit, func in SOURCES:
             log(f"Fetching {name} ...")
             try:
-                count, path = func(session)
+                count, path = func(session, run_time)
                 results.append((name, "OK", f"{count} {unit} -> {path.relative_to(ROOT)}"))
             except AuthError as exc:
                 results.append((name, "AUTH FAILED", str(exc)))
