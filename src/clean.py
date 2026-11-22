@@ -9,6 +9,7 @@ Nothing is imputed: a value we do not trust becomes NULL and gets a flag; the ra
 value is kept next to it. Thresholds: src/clean_config.py. Rule order: see that file.
 """
 
+import argparse
 import csv
 import hashlib
 import statistics
@@ -17,7 +18,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import clean_config as cfg
-from db import ROOT, connect, init_clean_schema, init_schema
+from db import ROOT, add_run_time_argument, connect, init_clean_schema, init_schema
 
 MAPPING_DIR = ROOT / "data" / "mappings"
 
@@ -396,6 +397,9 @@ def run(db_path=None):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Rebuild the cleaned layer (full rebuild every run).")
+    add_run_time_argument(parser)
+    parser.parse_args()   # --run-time is accepted for the runner; cleaning has no time rule
     try:
         return run()
     except Exception as exc:
