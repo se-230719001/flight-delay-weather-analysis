@@ -1,325 +1,185 @@
-"""M2 loader: reads landed raw files (data/raw/...) into the SQLite schema.
+"""M5 runner: one command that runs ingest -> load -> clean -> validate, honestly.
 
-Run from the repository root:
-    python src/load.py
+    python src/run_pipeline.py                          # fetch, load, clean, validate
+    python src/run_pipeline.py --skip-ingest            # rebuild from landed raw data (no network)
+    python src/run_pipeline.py --run-time 2026-11-20T08:10Z
 
-Properties: idempotent (upserts, latest retrieved_at wins), atomic (one transaction),
-parameterised (no values formatted into SQL), honest (run summary at the end).
+Rules:
+    - every step is a separate process (a crash in a step cannot take the runner down);
+    - the run stops at the first failing step and exits with THAT step's exit code;
+    - every step has a timeout: a step that does not finish in time is killed, exit code 124;
+    - every step that ran (including the failed one) is a row in data/pipeline_log.db;
+    - one clock: --run-time (default: now) is passed to every step;
+    - one run at a time: a second run exits 75 and runs nothing.
+
+Exit codes: 0 success | 75 another run in progress | 124 a step timed out |
+            127 a step could not be started | anything else: the failing step's own code.
 """
 
 import argparse
-import hashlib
-import json
-import math
+import os
+import subprocess
 import sys
-from pathlib import Path
+import time
+import uuid
+from datetime import datetime, timezone
 
-from db import (DB_PATH, ROOT, add_run_time_argument, connect, epoch_to_iso, init_schema,
-                meteo_time_to_iso, retrieved_at_from_filename)
+from db import (LOG_DB_PATH, ROOT, add_run_time_argument, connect, format_run_time,
+                resolve_run_time)
 
-RAW_DIR = ROOT / "data" / "raw"
-METEO_VARS = ["wind_speed_10m", "wind_gusts_10m", "precipitation", "showers", "cape"]
+# (script, timeout in seconds). Ingestion is the slow one: bounded retries + backoff.
+STEPS = [
+    ("src/ingest.py", 900),
+    ("src/load.py", 900),
+    ("src/clean.py", 900),
+    ("src/validate.py", 600),
+]
+EXIT_LOCKED = 75
+EXIT_TIMEOUT = 124
+EXIT_NOT_STARTED = 127
 
-# --- SQL (all values go through placeholders) ---------------------------------
-UPSERT_AIRCRAFT = """
-INSERT INTO aircraft (icao24, origin_country, retrieved_at) VALUES (?, ?, ?)
-ON CONFLICT (icao24) DO UPDATE SET
-    origin_country = excluded.origin_country,
-    retrieved_at   = excluded.retrieved_at
-WHERE excluded.retrieved_at > aircraft.retrieved_at
+LOCK_PATH = ROOT / "data" / "pipeline.lock"
+# A lock older than every timeout added together can only be left over from a crash or a
+# shutdown (the machine is switched off every day): it is stale and may be replaced.
+# Age is used, not a process id: os.kill(pid, 0) is not a safe "is it alive" test on Windows.
+LOCK_MAX_AGE_SECONDS = sum(t for _, t in STEPS) + 600
+
+CREATE_LOG_TABLE = """
+CREATE TABLE IF NOT EXISTS pipeline_run (
+    run_id      TEXT NOT NULL,   -- one per run
+    run_time    TEXT NOT NULL,   -- the pipeline's clock, ISO 8601 UTC
+    step        TEXT NOT NULL,   -- e.g. 'src/load.py'
+    started_at  TEXT NOT NULL,   -- wall clock, ISO 8601 UTC
+    finished_at TEXT NOT NULL,
+    exit_code   INTEGER NOT NULL,
+    detail      TEXT,            -- the step's summary lines
+    PRIMARY KEY (run_id, step)
+) STRICT
 """
-UPSERT_STATE = """
-INSERT INTO aircraft_state (aircraft_key, time_position, last_contact, callsign, longitude,
-    latitude, baro_altitude, geo_altitude, on_ground, velocity, true_track, vertical_rate,
-    squawk, spi, position_source, category, snapshot_time, retrieved_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (aircraft_key, time_position) DO UPDATE SET
-    last_contact = excluded.last_contact, callsign = excluded.callsign,
-    longitude = excluded.longitude, latitude = excluded.latitude,
-    baro_altitude = excluded.baro_altitude, geo_altitude = excluded.geo_altitude,
-    on_ground = excluded.on_ground, velocity = excluded.velocity,
-    true_track = excluded.true_track, vertical_rate = excluded.vertical_rate,
-    squawk = excluded.squawk, spi = excluded.spi,
-    position_source = excluded.position_source, category = excluded.category,
-    snapshot_time = excluded.snapshot_time, retrieved_at = excluded.retrieved_at
-WHERE excluded.retrieved_at > aircraft_state.retrieved_at
+INSERT_LOG = """
+INSERT INTO pipeline_run (run_id, run_time, step, started_at, finished_at, exit_code, detail)
+VALUES (?, ?, ?, ?, ?, ?, ?)
 """
-UPSERT_LOCATION = """
-INSERT INTO location (location_index, latitude, longitude, elevation, retrieved_at)
-VALUES (?, ?, ?, ?, ?)
-ON CONFLICT (location_index) DO UPDATE SET
-    latitude = excluded.latitude, longitude = excluded.longitude,
-    elevation = excluded.elevation, retrieved_at = excluded.retrieved_at
-WHERE excluded.retrieved_at > location.retrieved_at
-"""
-UPSERT_WEATHER = """
-INSERT INTO weather_hourly (location_key, observed_at, wind_speed_10m, wind_gusts_10m,
-    precipitation, showers, cape, retrieved_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (location_key, observed_at) DO UPDATE SET
-    wind_speed_10m = excluded.wind_speed_10m, wind_gusts_10m = excluded.wind_gusts_10m,
-    precipitation = excluded.precipitation, showers = excluded.showers,
-    cape = excluded.cape, retrieved_at = excluded.retrieved_at
-WHERE excluded.retrieved_at > weather_hourly.retrieved_at
-"""
-INSERT_QUARANTINE = """
-INSERT INTO quarantine (source, reason, record_hash, raw_record, retrieved_at)
-VALUES (?, ?, ?, ?, ?)
-ON CONFLICT (source, record_hash, retrieved_at) DO NOTHING
-"""
-COUNT_SQL = {
-    "aircraft": "SELECT COUNT(*) FROM aircraft",
-    "aircraft_state": "SELECT COUNT(*) FROM aircraft_state",
-    "location": "SELECT COUNT(*) FROM location",
-    "weather_hourly": "SELECT COUNT(*) FROM weather_hourly",
-    "quarantine": "SELECT COUNT(*) FROM quarantine",
-}
+DETAIL_KEYWORDS = ("this run", "STATUS", "sources fetched", "checks:", "ERROR", "WARN", "FAILED")
 
 
-class LoadError(Exception):
-    """Raw data is structurally broken: abort the whole run, write nothing."""
+def wall_clock():
+    """Wall clock: used ONLY for the started_at / finished_at log timestamps."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-class Stats:
-    def __init__(self):
-        self.cleaned = 0          # non-null values that did not fit their column -> NULL
-        self.quarantined = {}     # (source, hash, retrieved_at) -> row, de-duplicated
-
-
-# --- Validation helpers ---------------------------------------------------------
-def to_real(value, stats):
-    """Number -> float. null -> NULL (not recorded). Anything else -> NULL, counted."""
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        stats.cleaned += 1
-        return None
-    if isinstance(value, (int, float)):
-        if math.isfinite(value):
-            return float(value)
-        stats.cleaned += 1
-        return None
-    if isinstance(value, str):
+# --- Lock ----------------------------------------------------------------------------
+def acquire_lock():
+    """True if we now hold the lock. False if another run is genuinely in progress."""
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    for _ in range(3):
         try:
-            number = float(value)
-            if math.isfinite(number):
-                return number
-        except ValueError:
-            pass
-    stats.cleaned += 1
-    return None
-
-
-def to_int(value, stats):
-    number = to_real(value, stats)
-    return None if number is None else int(number)
-
-
-def to_flag(value, stats):
-    """Boolean -> 0/1. null -> NULL. Anything else -> NULL, counted."""
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return int(value)
-    stats.cleaned += 1
-    return None
-
-
-def to_text(value, stats):
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return value
-    stats.cleaned += 1
-    return None
-
-
-def to_time(value, stats):
-    """Epoch seconds -> ISO 8601 UTC. null -> NULL. Invalid -> NULL, counted."""
-    if value is None:
-        return None
-    iso = epoch_to_iso(value) if not isinstance(value, (bool, str)) else None
-    if iso is None:
-        stats.cleaned += 1
-    return iso
-
-
-def quarantine(stats, source, reason, record, retrieved_at):
-    raw = json.dumps(record, ensure_ascii=False, sort_keys=True)
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-    stats.quarantined[(source, digest, retrieved_at)] = (source, reason, digest, raw, retrieved_at)
-
-
-def newer(candidate, current):
-    """Latest retrieval wins; the file name only breaks exact ties."""
-    return current is None or candidate[0] >= current[0]
-
-
-# --- Reading raw files ----------------------------------------------------------
-def list_raw(raw_dir, source):
-    files = []
-    for path in (Path(raw_dir) / source).glob("*.json"):
-        files.append((retrieved_at_from_filename(path), path.name, path))
-    return sorted(files)
-
-
-def read_json(path):
-    try:
-        return json.loads(path.read_bytes())
-    except ValueError as exc:
-        raise LoadError(f"{path.name}: not valid JSON ({exc})")
-
-
-def parse_opensky(files, stats):
-    aircraft, states = {}, {}   # icao24 -> (sort key, row); (icao24, time_position) -> ...
-    for retrieved_at, name, path in files:
-        data = read_json(path)
-        if not isinstance(data, dict) or not isinstance(data.get("states"), list):
-            raise LoadError(f"{name}: expected an object with a 'states' list")
-        snapshot = to_time(data.get("time"), stats)
-        order = (retrieved_at, name)
-        for s in data["states"]:
-            if not isinstance(s, list) or len(s) not in (17, 18):
-                raise LoadError(f"{name}: state vector has an unexpected shape")
-            icao = s[0].strip().lower() if isinstance(s[0], str) and s[0].strip() else None
-            time_position = to_time(s[3], stats)
-            if icao is None or time_position is None:
-                reason = "missing icao24" if icao is None else "missing or invalid time_position"
-                quarantine(stats, "opensky", reason, s, retrieved_at)
-                continue
-            country = to_text(s[2], stats)
-            cur = aircraft.get(icao)
-            if newer((order,), cur and (cur[0],)):
-                aircraft[icao] = (order, (icao, country, retrieved_at))
-            row = (to_time(s[4], stats), to_text(s[1], stats), to_real(s[5], stats),
-                   to_real(s[6], stats), to_real(s[7], stats), to_real(s[13], stats),
-                   to_flag(s[8], stats), to_real(s[9], stats), to_real(s[10], stats),
-                   to_real(s[11], stats), to_text(s[14], stats), to_flag(s[15], stats),
-                   to_int(s[16], stats), to_int(s[17], stats) if len(s) == 18 else None,
-                   snapshot, retrieved_at)
-            key = (icao, time_position)
-            cur = states.get(key)
-            if newer((order,), cur and (cur[0],)):
-                states[key] = (order, row)
-    return aircraft, states
-
-
-def parse_openmeteo(files, stats):
-    locations, weather = {}, {}   # index -> ...; (index, observed_at) -> ...
-    for retrieved_at, name, path in files:
-        data = read_json(path)
-        items = data if isinstance(data, list) else [data]
-        order = (retrieved_at, name)
-        for index, loc in enumerate(items):
-            if not isinstance(loc, dict) or not isinstance(loc.get("hourly"), dict):
-                raise LoadError(f"{name}: location {index} has no 'hourly' object")
-            hourly = loc["hourly"]
-            times = hourly.get("time")
-            if not isinstance(times, list):
-                raise LoadError(f"{name}: location {index} has no 'time' list")
-            for var in METEO_VARS:
-                if var in hourly and (not isinstance(hourly[var], list)
-                                      or len(hourly[var]) != len(times)):
-                    raise LoadError(f"{name}: location {index}: '{var}' does not match 'time'")
-            cur = locations.get(index)
-            if newer((order,), cur and (cur[0],)):
-                locations[index] = (order, (index, to_real(loc.get("latitude"), stats),
-                                            to_real(loc.get("longitude"), stats),
-                                            to_real(loc.get("elevation"), stats), retrieved_at))
-            for i, t in enumerate(times):
-                observed_at = meteo_time_to_iso(t)
-                if observed_at is None:
-                    quarantine(stats, "openmeteo", "invalid hourly time",
-                               {"location_index": index, "time": t}, retrieved_at)
-                    continue
-                values = tuple(to_real(hourly[v][i], stats) if v in hourly else None
-                               for v in METEO_VARS)
-                key = (index, observed_at)
-                cur = weather.get(key)
-                if newer((order,), cur and (cur[0],)):
-                    weather[key] = (order, values + (retrieved_at,))
-    return locations, weather
-
-
-# --- Writing --------------------------------------------------------------------
-def counts(con):
-    return {t: con.execute(sql).fetchone()[0] for t, sql in COUNT_SQL.items()}
-
-
-def write_all(con, aircraft, states, locations, weather, stats):
-    for _, row in aircraft.values():
-        con.execute(UPSERT_AIRCRAFT, row)
-    for _, row in locations.values():
-        con.execute(UPSERT_LOCATION, row)
-    aircraft_key = {r[0]: r[1] for r in con.execute("SELECT icao24, aircraft_key FROM aircraft")}
-    location_key = {r[0]: r[1] for r in con.execute("SELECT location_index, location_key FROM location")}
-
-    state_rows = []
-    for (icao, time_position), (_, row) in states.items():
-        if icao not in aircraft_key:   # unknown reference -> quarantine, never drop or crash
-            quarantine(stats, "opensky", "unknown aircraft", [icao, time_position], row[-1])
+            fd = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                age = time.time() - LOCK_PATH.stat().st_mtime
+            except FileNotFoundError:
+                continue   # released between our two calls: try again
+            if age < LOCK_MAX_AGE_SECONDS:
+                return False
+            print(f"Removing a stale lock ({age / 3600:.1f} h old, left by a crash or shutdown).")
+            LOCK_PATH.unlink(missing_ok=True)
             continue
-        state_rows.append((aircraft_key[icao], time_position) + row)
-    con.executemany(UPSERT_STATE, state_rows)
-
-    weather_rows = []
-    for (index, observed_at), (_, values) in weather.items():
-        if index not in location_key:
-            quarantine(stats, "openmeteo", "unknown location", [index, observed_at], values[-1])
-            continue
-        weather_rows.append((location_key[index], observed_at) + values)
-    con.executemany(UPSERT_WEATHER, weather_rows)
-
-    con.executemany(INSERT_QUARANTINE, list(stats.quarantined.values()))
+        with os.fdopen(fd, "w") as fh:
+            fh.write(f"pid {os.getpid()} since {wall_clock()}\n")
+        return True
+    return False
 
 
-def run(db_path=None, raw_dir=None):
-    raw_dir = Path(raw_dir) if raw_dir else RAW_DIR
-    stats = Stats()
-    sky_files, meteo_files = list_raw(raw_dir, "opensky"), list_raw(raw_dir, "openmeteo")
-    all_files = sky_files + meteo_files
-    if not all_files:
-        raise LoadError(f"no raw files found in {raw_dir}")
+def release_lock():
+    LOCK_PATH.unlink(missing_ok=True)
 
-    # Parse and validate everything first; any structural problem aborts before writing.
-    aircraft, states = parse_opensky(sky_files, stats)
-    locations, weather = parse_openmeteo(meteo_files, stats)
 
-    con = connect(db_path, create=True)   # load.py builds the database
+# --- Log -----------------------------------------------------------------------------
+def log_step(run_id, run_time, step, started_at, finished_at, exit_code, detail):
+    con = connect(LOG_DB_PATH, create=True)   # the run log is created on first use
     try:
-        init_schema(con)
-        before = counts(con)
-        with con:   # ONE transaction: commit on success, roll back on any exception
-            write_all(con, aircraft, states, locations, weather, stats)
-        after = counts(con)
-        fk_problems = con.execute("PRAGMA foreign_key_check").fetchall()
+        with con:
+            con.execute(CREATE_LOG_TABLE)
+            con.execute(INSERT_LOG, (run_id, run_time, step, started_at, finished_at,
+                                     exit_code, detail))
     finally:
         con.close()
 
-    stamps = sorted(f[0] for f in all_files)
-    print(f"files read: {len(all_files)} raw files ({stamps[0][:10]} .. {stamps[-1][:10]})")
-    for table, label in [("aircraft", "aircraft"), ("aircraft_state", "aircraft states"),
-                         ("location", "locations"), ("weather_hourly", "weather hours")]:
-        print(f"{label}: {after[table]:,} in database (+{after[table] - before[table]:,} this run)")
-    print(f"values cleaned: {stats.cleaned} (invalid non-null values -> NULL)")
-    print(f"quarantined: {len(stats.quarantined)} records "
-          f"({after['quarantine'] - before['quarantine']} new this run)")
-    print(f"foreign_key_check: {'OK' if not fk_problems else f'{len(fk_problems)} VIOLATIONS'}")
-    print("STATUS: COMPLETE" if not fk_problems else "STATUS: FAILED")
-    return 0 if not fk_problems else 1
+
+def summarize(output, exit_code):
+    lines = [ln.strip() for ln in output.splitlines() if ln.strip()]
+    picked = [ln for ln in lines if any(k in ln for k in DETAIL_KEYWORDS)]
+    if not picked:
+        picked = lines[-2:]
+    if exit_code != 0:
+        picked = picked + lines[-2:]
+    seen, unique = set(), []
+    for ln in picked:
+        if ln not in seen:
+            seen.add(ln)
+            unique.append(ln)
+    return "; ".join(unique)[:600] or None
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Load landed raw files into the M2 tables.")
-    add_run_time_argument(parser)
-    parser.parse_args()   # --run-time is accepted for the runner; loading is a full reload
+# --- One step ------------------------------------------------------------------------
+def as_text(value):
+    if value is None:
+        return ""
+    return value.decode("utf-8", "replace") if isinstance(value, bytes) else value
+
+
+def run_step(step, timeout, run_time_text):
+    """Run one step as its own process. Returns (exit_code, output)."""
+    cmd = [sys.executable, step, "--run-time", run_time_text]
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")   # Windows consoles are not UTF-8
     try:
-        return run()
-    except Exception as exc:   # nothing from this run was written
-        print(f"ERROR: {type(exc).__name__}: {exc}")
-        print("nothing was written to the database")
-        print("STATUS: FAILED")
-        return 1
+        proc = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        out = as_text(exc.stdout) + as_text(exc.stderr)
+        return EXIT_TIMEOUT, out + f"\nERROR: {step} did not finish within {timeout} s and was stopped"
+    except OSError as exc:
+        return EXIT_NOT_STARTED, f"ERROR: could not start {step}: {exc}"
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Run ingest -> load -> clean -> validate.")
+    add_run_time_argument(parser)
+    parser.add_argument("--skip-ingest", action="store_true",
+                        help="do not fetch: rebuild everything from the landed raw data")
+    args = parser.parse_args(argv)
+
+    run_time = resolve_run_time(args.run_time)
+    run_time_text = format_run_time(run_time)
+    run_id = uuid.uuid4().hex[:8]
+
+    if not acquire_lock():
+        print(f"Another pipeline run is in progress ({LOCK_PATH}). Nothing was run.")
+        return EXIT_LOCKED
+
+    steps = [s for s in STEPS if not (args.skip_ingest and s[0] == "src/ingest.py")]
+    try:
+        print(f"Pipeline run {run_id}, run time {run_time_text}"
+              + (" (ingestion skipped)" if args.skip_ingest else ""))
+        for step, timeout in steps:
+            print(f"--- {step} ---", flush=True)
+            started_at = wall_clock()
+            code, output = run_step(step, timeout, run_time_text)
+            finished_at = wall_clock()
+            log_step(run_id, run_time_text, step, started_at, finished_at, code,
+                     summarize(output, code))
+            print(output.rstrip())
+            if code != 0:
+                print(f"PIPELINE FAILED at {step} (exit code {code}"
+                      + (", timeout" if code == EXIT_TIMEOUT else "")
+                      + f"). Later steps did not run. Run {run_id}.")
+                return code
+        print(f"PIPELINE OK: all {len(steps)} steps succeeded. Run {run_id}, run time {run_time_text}.")
+        return 0
+    finally:
+        release_lock()
 
 
 if __name__ == "__main__":
