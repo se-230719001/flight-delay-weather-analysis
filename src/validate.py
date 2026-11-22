@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import clean_config as cfg
-from db import DB_PATH, connect
+from db import DB_PATH, connect, format_run_time, parse_run_time, resolve_run_time
 
 # --- SQL (fixed text; values only through placeholders) -------------------------
 COUNT_PAIRS = [("aircraft_state_clean", "SELECT COUNT(*) FROM aircraft_state_clean",
@@ -165,14 +165,20 @@ def check_coverage(con):
     return "PASS", name, "%d of %d locations, newest hour %s" % (len(latest), len(latest), newest)
 
 
+RUN_TIME = None   # set by main(): the pipeline's clock (never the wall clock)
+
+
 def check_freshness(con):
+    """Freshness is measured from the run time, so a whole feed that stopped is visible."""
     newest = scalar(con, NEWEST_RETRIEVAL)
-    name = "newest raw retrieval is at most %d h old" % cfg.FRESHNESS_HOURS
+    name = "newest raw retrieval is at most %d h before the run time" % cfg.FRESHNESS_HOURS
     if not newest:
         return "WARN", name, "no data"
-    age = datetime.now(timezone.utc) - datetime.strptime(newest, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    run_time = RUN_TIME or resolve_run_time(None)
+    age = run_time - datetime.strptime(newest, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     status = "PASS" if age <= timedelta(hours=cfg.FRESHNESS_HOURS) else "WARN"
-    return status, name, "newest %s (%.1f h ago)" % (newest, age.total_seconds() / 3600)
+    return status, name, "newest %s (%.1f h before %s)" % (newest, age.total_seconds() / 3600,
+                                                            format_run_time(run_time))
 
 
 def count_check(sql, label, extra=""):
@@ -233,6 +239,13 @@ def selftest(db_path):
 
 
 def main(argv):
+    global RUN_TIME
+    if "--run-time" in argv:
+        try:
+            RUN_TIME = parse_run_time(argv[argv.index("--run-time") + 1])
+        except (IndexError, ValueError) as exc:
+            print("ERROR: --run-time needs a value like 2026-11-20T08:10Z (%s)" % exc)
+            return 2
     path = DB_PATH
     if not Path(path).exists():
         print("ERROR: %s not found: run python src/load.py and python src/clean.py first" % path)
