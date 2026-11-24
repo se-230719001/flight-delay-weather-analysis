@@ -71,8 +71,10 @@ OPENMETEO_FORECAST_DAYS = os.environ.get("OPENMETEO_FORECAST_DAYS", "1")
 
 # --- Self-healing (M5) -----------------------------------------------------------
 # Overlap re-fetched on top of the gap since the last retrieval, so late or revised values
-# are picked up again. PROVISIONAL: replace with the value your delay table justifies.
-OVERLAP_HOURS = float(os.environ.get("INGEST_OVERLAP_HOURS", "6"))
+# are picked up again. Evidence (docs/pipeline.md, "How late our data arrives"): Open-Meteo
+# revised 250 of 960 hours that appeared in more than one file, up to 28.7 h after the hour
+# they describe. 30 h covers that; OpenSky states are at most ~1 h old, so it needs no overlap.
+OVERLAP_HOURS = float(os.environ.get("INGEST_OVERLAP_HOURS", "30"))
 MAX_PAST_DAYS = 92   # Open-Meteo's own limit for past_days: an outage longer than this loses data
 # OpenSky keeps no history: any gap longer than this is data that is gone for good.
 OPENSKY_MAX_GAP_HOURS = float(os.environ.get("OPENSKY_MAX_GAP_HOURS", "2"))

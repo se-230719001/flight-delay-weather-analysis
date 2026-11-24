@@ -38,6 +38,12 @@ EXIT_LOCKED = 75
 EXIT_TIMEOUT = 124
 EXIT_NOT_STARTED = 127
 
+# Drill hooks (docs/pipeline.md, section 4). Both are OFF unless the environment variable is set:
+#   PIPELINE_DRILL_HANG=src/clean.py   that step sleeps instead of running (hang drill)
+#   PIPELINE_TIMEOUT_OVERRIDE=5        every step gets this many seconds instead
+DRILL_HANG_STEP = os.environ.get("PIPELINE_DRILL_HANG")
+TIMEOUT_OVERRIDE = os.environ.get("PIPELINE_TIMEOUT_OVERRIDE")
+
 LOCK_PATH = ROOT / "data" / "pipeline.lock"
 # A lock older than every timeout added together can only be left over from a crash or a
 # shutdown (the machine is switched off every day): it is stale and may be replaced.
@@ -132,6 +138,10 @@ def as_text(value):
 def run_step(step, timeout, run_time_text):
     """Run one step as its own process. Returns (exit_code, output)."""
     cmd = [sys.executable, step, "--run-time", run_time_text]
+    if DRILL_HANG_STEP == step:
+        cmd = [sys.executable, "-c", "import time; time.sleep(3600)"]
+    if TIMEOUT_OVERRIDE:
+        timeout = float(TIMEOUT_OVERRIDE)
     env = dict(os.environ, PYTHONIOENCODING="utf-8")   # Windows consoles are not UTF-8
     try:
         proc = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True,
