@@ -347,9 +347,25 @@ python src/validate.py
 jupyter nbconvert --to notebook --execute --inplace notebooks/m4_eda.ipynb
 ```
 
+## Pipeline
+
+```
+python src/run_pipeline.py               # fetch, load, clean, validate
+python src/run_pipeline.py --skip-ingest # rebuild from landed raw data (no network)
+python src/monitor.py                    # is it healthy?
+```
+
+- **Schedule:** hourly on one team member's Windows machine (Task Scheduler, minute 07; the
+  monitor runs as a separate task at minute 12). The task files are in `ops/`
+  (`install_task.ps1`, `task_scheduler.xml`, `run_pipeline.bat`).
+- **When it fails:** the runner stops at the first failing step, exits with that step's code
+  (124 = timeout, 75 = another run in progress) and records the step in `data/pipeline_log.db`.
+  `monitor.py` reports what the pipeline cannot: a stopped schedule, gaps, missing hours, stale data.
+- Design, operation, evidence and limits: [docs/pipeline.md](docs/pipeline.md).
+
 ## Status
 
-M4 — exploratory analysis complete.
+M5 — pipeline running on a schedule since 2026-11-22.
 
 ## Team
 
