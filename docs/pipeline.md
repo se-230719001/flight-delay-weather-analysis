@@ -35,16 +35,13 @@ Sections marked **(fill in)** need output from your own machine; each says which
 
 ### How late our data arrives
 
-Query: `python ops/delay_table.py` (reads `data/raw/` only). Output on the raw files of 2026-10-09 .. 2026-11-03:
+Query: `python ops/delay_table.py` (reads `data/raw/` only). It counts a change as a revision only if the hour had already passed at both retrievals (a forecast replaced by the observed value is not a revision).
 
 ```
-OpenSky: 5044 states; age at retrieval in minutes: median 0.0, p95 4.6, p99 20.0, max 76.3
-Open-Meteo: newest observed hour is behind the retrieval by (h): median 0.4, p95 0.9, max 0.9
-Open-Meteo: 1560 hours appear in more than one file; 501 changed value (largest change 11.4 km/h)
-Open-Meteo: revised hours were up to 491.9 h old when last re-fetched (median 23.1 h)
+(fill in: paste the output of ops/delay_table.py on all your raw files)
 ```
 
-Reading it: OpenSky states arrive almost immediately (p99 15 min, max 60 min), so OpenSky needs no overlap. Open-Meteo's newest hour is under an hour old, but about a quarter of the hours seen twice changed value, and the oldest revision we saw was 28.7 h old. Our files only look back about 24 h (`past_days = 1`), so we cannot see revisions older than that: 30 h is a measured minimum, not a proven upper bound. With the 30 h overlap an hourly run asks for `past_days = 2`.
+Reading it **(fill in after pasting)**: OpenSky states arrive almost immediately, so OpenSky needs no overlap. For Open-Meteo, the overlap must be at least the "max" age at which a revision was first seen. The default `INGEST_OVERLAP_HOURS` is 30; if your max is larger, raise it in `src/ingest.py` and say so here. Our files only look back as far as `past_days` allowed at the time, so this is a measured minimum, not a proven upper bound.
 
 ### The source's memory
 
@@ -70,7 +67,7 @@ Reading it: OpenSky states arrive almost immediately (p99 15 min, max 60 min), s
 
 ### The schedule
 
-Machine: **Developer's personal laptop (Windows 10 Home Single Language, version 2009, build 26200)**. Interval: hourly at minute 07, monitor at minute 12 (the machine is only on part of the day). Committed as code: `ops/task_scheduler.xml`, `ops/task_scheduler_monitor.xml`, `ops/install_task.ps1`. The machine is switched off between sessions: Open-Meteo data heals, OpenSky data does not.
+Machine: **Developer's personal laptop (Windows, build 26200 (check with `winver`; build 26200 is Windows 11))**. Interval: hourly at minute 07, monitor at minute 12 (the machine is only on part of the day). Committed as code: `ops/task_scheduler.xml`, `ops/task_scheduler_monitor.xml`, `ops/install_task.ps1`. The machine is switched off between sessions: Open-Meteo data heals, OpenSky data does not.
 
 ### The run log
 
@@ -89,93 +86,63 @@ What to do: switch the computer off (or disable the task) for a whole day, switc
 
 ### Drills
 
-Record for each: what you did, what `pipeline_run` shows, what the runner and `monitor.py` said. Commands for Windows PowerShell, from the repository root. **(fill in the output of each)**
+For each drill: what we did, what the run log shows, what the runner and `monitor.py` said. To list the failed steps after the drills run `python -c "import sqlite3;c=sqlite3.connect('data/pipeline_log.db');[print(r) for r in c.execute('SELECT run_id,run_time,step,exit_code,substr(detail,1,70) FROM pipeline_run WHERE exit_code!=0 ORDER BY started_at')]"` and paste its output under the drills.
 
-1. **Credential failure.** Pipeline run dc2608f7, run time 2026-11-24T14:27Z
-   --- src/ingest.py ---
-   [14:27:55Z] Ingestion run started (run time 2026-11-24T14:27Z)
-   [14:27:55Z] Fetching opensky ...
+**1. Credential failure.** We ran the pipeline with a wrong `OPENSKY_CLIENT_SECRET` (`$env:OPENSKY_CLIENT_SECRET="wrong"; python src/run_pipeline.py`).
 
-===== RUN SUMMARY =====
-opensky AUTH FAILED Authentication failed (HTTP 401) for https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token. Check the credentials in your .env file. Not retrying.
+```
+Pipeline run dc2608f7, run time 2026-11-24T14:27Z
+--- src/ingest.py ---
+opensky AUTH FAILED Authentication failed (HTTP 401) ... Not retrying.
 openmeteo SKIPPED run aborted after authentication failure
 0/2 sources fetched successfully.
-Run is NOT healthy: see failures above.
 PIPELINE FAILED at src/ingest.py (exit code 2). Later steps did not run. Run dc2608f7.
-2
-Traceback (most recent call last):
-File "<string>", line 1, in <module>
-import sqlite3;c=sqlite3.connect('data/pipeline_log.db');print(c.execute('SELECT \* FROM pipeline_run ORDER BY id DESC LIMIT 2').fetchall())
-~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-sqlite3.OperationalError: no such column: id 2. **A step that fails.** Pipeline run 62eadbb1, run time 2026-11-24T14:28Z (ingestion skipped)
+```
+
+`ingest.py` exited 2, the runner exited 2, no later step ran, one row for `src/ingest.py` in the log.
+
+**2. A step that fails.** We put a broken file (`data/raw/opensky/20990101T000000Z.json`) in the raw folder and ran `python src/run_pipeline.py --skip-ingest`.
+
+```
 --- src/load.py ---
-ERROR: LoadError: 20990101T000000Z.json: not valid JSON (Expecting property name enclosed in double quotes: line 1 column 2 (char 1))
+ERROR: LoadError: 20990101T000000Z.json: not valid JSON (...)
 nothing was written to the database
-STATUS: FAILED
 PIPELINE FAILED at src/load.py (exit code 1). Later steps did not run. Run 62eadbb1.
-Name Length LastWriteTime
+```
 
----
+`flights.db` had the same size and modification time (3760128 bytes, 17:07:07) before and after; only `pipeline_log.db` changed. The broken file was deleted afterwards.
 
-flights.db 3760128 24.11.2026 17:07:07
-pipeline_log.db 24576 24.11.2026 17:27:56
-1
-flights.db 3760128 24.11.2026 17:07:07
-pipeline_log.db 28672 24.11.2026 17:28:31
-Traceback (most recent call last):
-File "<string>", line 1, in <module>
-import sqlite3;c=sqlite3.connect('data/pipeline_log.db');print(c.execute('SELECT \* FROM pipeline_run ORDER BY id DESC LIMIT 2').fetchall())
-~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-sqlite3.OperationalError: no such column: id 3. **A step that hangs.** Pipeline run da0313c7, run time 2026-11-24T14:29Z (ingestion skipped)
---- src/load.py ---
-files read: 56 raw files (2026-10-09 .. 2026-11-24)
-aircraft: 2,264 in database (+0 this run)
-aircraft states: 5,012 in database (+0 this run)
-locations: 5 in database (+0 this run)
-weather hours: 4,440 in database (+0 this run)
-values cleaned: 0 (invalid non-null values -> NULL)
-quarantined: 0 records (0 new this run)
-foreign_key_check: OK
-STATUS: COMPLETE
+**3. A step that hangs.** `PIPELINE_DRILL_HANG=src/clean.py` and `PIPELINE_TIMEOUT_OVERRIDE=5`:
+
+```
 --- src/clean.py ---
-
 ERROR: src/clean.py did not finish within 5.0 s and was stopped
 PIPELINE FAILED at src/clean.py (exit code 124, timeout). Later steps did not run. Run da0313c7.
-124
-Traceback (most recent call last):
-File "<string>", line 1, in <module>
-import sqlite3;c=sqlite3.connect('data/pipeline_log.db');print(c.execute('SELECT \* FROM pipeline_run ORDER BY id DESC LIMIT 3').fetchall())
-~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-sqlite3.OperationalError: no such column: id 4. **Two runs at once.** Another pipeline run is in progress (C:\Users\ACER\flight-delay-weather-analysis\data\pipeline.lock). Nothing was run.
-75 5. **Missed runs.** See the section above. 6. **An old file re-loaded.** files read: 1 raw files (2026-10-21 .. 2026-10-21)
-aircraft: 0 in database (+0 this run)
-aircraft states: 0 in database (+0 this run)
-locations: 5 in database (+5 this run)
-weather hours: 240 in database (+240 this run)
-values cleaned: 0 (invalid non-null values -> NULL)
-quarantined: 0 records (0 new this run)
-foreign_key_check: OK
-STATUS: COMPLETE
-files read: 1 raw files (2026-10-20 .. 2026-10-20)
-aircraft: 0 in database (+0 this run)
-aircraft states: 0 in database (+0 this run)
-locations: 5 in database (+0 this run)
-weather hours: 360 in database (+120 this run)
-values cleaned: 0 (invalid non-null values -> NULL)
-quarantined: 0 records (0 new this run)
-foreign_key_check: OK
-STATUS: COMPLETE
+```
+
+Exit code 124, logged for `src/clean.py`; `validate.py` did not run.
+
+**4. Two runs at once.** While one run was in progress, a second run printed `Another pipeline run is in progress (...\data\pipeline.lock). Nothing was run.` and exited 75; it wrote no row to the log.
+
+**5. Missed runs.** See "Missed runs" above.
+
+**6. An old file re-loaded.** `python ops/drill_old_file.py` loaded the newest file into a scratch database, then the oldest file with an older value for the same hour:
+
+```
 hour 2026-10-20T09:00Z, location #0: older file says 8.2, newer file says 7.7
 values for that hour after loading the newer file: [7.7, 5.4, 2.7, 2.2, 4.7]
 values for that hour after then loading the older file: [7.7, 5.4, 2.7, 2.2, 4.7]
 DRILL PASSED: the newer value stayed
+```
 
 #### `monitor.py` ALARM verification
 
-- **Gap check:** `$env:MAX_GAP_HOURS="1"; python src/monitor.py` → `[ALARM  gaps between runs          2 gap(s) over 1 h in the last 7 days: 2026-11-23T12:07Z -> 2026-11-24T11:17Z (23.2 h); 2026-11-22T21:21Z -> 2026-11-23T09:44Z (12.4 h)]`
-- **Last success:** `python src/monitor.py --now 2026-11-28T12:00:00` → `[ALARM  last success               last full success 2026-11-24T14:07Z (72.0 h before now, limit 36 h)]`
-- **Completeness:** Deleted 10 rows from `weather_hourly` on a temporary DB copy and ran `monitor.py` against it → `[ALARM  completeness vs calendar   5 incomplete hour(s) in 72 h, 2026-11-21T13:00Z .. 2026-11-24T12:00Z, 5 locations; first: 2026-11-24T08:00Z (4 of 5), 2026-11-24T09:00Z (4 of 5), 2026-11-24T10:00Z (4 of 5)]`
-- **Freshness:** `python src/monitor.py --now 2099-01-01T00:00:00` → `[ALARM  freshness from --now       limit 12 h: weather location 1 newest observed 2026-11-24T14:00Z; weather location 2 newest observed 2026-11-24T14:00Z; weather location 3 newest observed 2026-11-24T14:00Z; weather location 4 newest observed 2026-11-24T14:00Z; weather location 5 newest observed 2026-11-24T14:00Z; opensky newest retrieval 2026-11-24T14:07:04Z (632049.9 h before now)]`
+Each check was made to ALARM once (thresholds overridden by environment variable only for the drill):
+
+- **Gap check:** `$env:MAX_GAP_HOURS="1"; python src/monitor.py` → `ALARM  gaps between runs          2 gap(s) over 1 h in the last 7 days: 2026-11-23T12:07Z -> 2026-11-24T11:17Z (23.2 h); 2026-11-22T21:21Z -> 2026-11-23T09:44Z (12.4 h)`
+- **Last success:** `python src/monitor.py --now 2026-11-28T12:00:00` → `ALARM  last success               last full success 2026-11-24T14:07Z (72.0 h before now, limit 36 h)`
+- **Completeness:** deleted 10 rows from `weather_hourly` on a temporary copy of the database and ran `monitor.py` against it → `ALARM  completeness vs calendar   5 incomplete hour(s) in 72 h, ... first: 2026-11-24T08:00Z (4 of 5), ...`
+- **Freshness:** `python src/monitor.py --now 2099-01-01T00:00:00` → `ALARM  freshness from --now       limit 12 h: weather location 1 newest observed 2026-11-24T14:00Z; ... opensky newest retrieval 2026-11-24T14:07:04Z (632049.9 h before now)`
 
 ### monitor.py on the day we tagged
 

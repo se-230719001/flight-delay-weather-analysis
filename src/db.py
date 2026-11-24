@@ -36,7 +36,7 @@ def connect(path=None, create=False):
 # --- The pipeline's clock ---------------------------------------------------------
 def parse_run_time(text):
     """'2026-11-20T08:10Z' (or with seconds) -> aware UTC datetime."""
-    for fmt in (RUN_TIME_FORMAT, "%Y-%m-%dT%H:%M:%SZ"):
+    for fmt in (RUN_TIME_FORMAT, "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"):
         try:
             return datetime.strptime(text.strip(), fmt).replace(tzinfo=timezone.utc)
         except ValueError:

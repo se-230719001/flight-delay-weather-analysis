@@ -4,14 +4,15 @@
 
 Reads data/raw/ only. OpenSky: age of each state (retrieval time minus time_position).
 Open-Meteo: how far behind the retrieval the newest observed hour is, and how many hours
-changed value between files, and how old those hours were when last re-fetched.
+changed value between files AFTER they had passed (forecast -> observed is not counted),
+and how old the hour was when the change was first seen.
 """
 import collections
 import glob
 import json
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 RAW = Path(__file__).resolve().parent.parent / "data" / "raw"
@@ -53,24 +54,33 @@ def main():
     lag.sort()
     print("Open-Meteo: newest observed hour is behind the retrieval by (h): median %.1f, p95 %.1f, max %.1f"
           % (pct(lag, .5), pct(lag, .95), lag[-1]))
-    multi = revised = 0
+    # A real revision: the hour had already PASSED at both retrievals (so neither value was a
+    # forecast) and the two values differ. A forecast replaced by the observed value is not a
+    # revision of the source, so it is not counted.
+    hour = timedelta(hours=1)
+    refetched = revised = 0
     biggest, ages_h = 0.0, []
     for (i, x), seen in versions.items():
-        if len(seen) < 2:
+        ts = datetime.strptime(x, "%Y-%m-%dT%H:%M").replace(tzinfo=timezone.utc)
+        past = [(t, v) for t, v in sorted(seen) if v is not None and t >= ts + hour]
+        if len(past) < 2:
             continue
-        multi += 1
-        values = {v for _, v in seen if v is not None}
-        if len(values) > 1:
-            revised += 1
-            biggest = max(biggest, max(values) - min(values))
-            ts = datetime.strptime(x, "%Y-%m-%dT%H:%M").replace(tzinfo=timezone.utc)
-            ages_h.append(max(0.0, (seen[-1][0] - ts).total_seconds() / 3600))
+        refetched += 1
+        changed = False
+        for (t1, v1), (t2, v2) in zip(past, past[1:]):
+            if v1 != v2:
+                changed = True
+                biggest = max(biggest, abs(v2 - v1))
+                ages_h.append((t2 - ts).total_seconds() / 3600)   # age of the hour when the change was first seen
+        revised += changed
     ages_h.sort()
-    print("Open-Meteo: %d hours appear in more than one file; %d changed value (largest change %.1f km/h)"
-          % (multi, revised, biggest))
+    print("Open-Meteo: %d hours were fetched again after they had passed; %d of them changed value "
+          "(largest change %.1f km/h)" % (refetched, revised, biggest))
     if ages_h:
-        print("Open-Meteo: revised hours were up to %.1f h old when last re-fetched (median %.1f h)"
-              % (ages_h[-1], pct(ages_h, .5)))
+        print("Open-Meteo: revisions were first seen when the hour was (h old): median %.1f, p95 %.1f, max %.1f"
+              % (pct(ages_h, .5), pct(ages_h, .95), ages_h[-1]))
+    else:
+        print("Open-Meteo: no revision of an already-passed hour seen yet")
 
 
 if __name__ == "__main__":
