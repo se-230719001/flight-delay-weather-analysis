@@ -11,6 +11,8 @@ SCRATCH databases from the landed raw files (your real database is not touched):
 and runs monitor.py's completeness check on both, with the clock set shortly after NEXT.
 """
 import argparse
+import contextlib
+import io
 import shutil
 import sqlite3
 import sys
@@ -44,7 +46,8 @@ def build(raw_dir, upto, out_db):
         for path in (RAW / source).glob("*.json"):
             if retrieved_at_from_filename(path) <= upto:
                 shutil.copy(path, raw_dir / source / path.name)
-    load.run(db_path=out_db, raw_dir=raw_dir)
+    with contextlib.redirect_stdout(io.StringIO()):   # keep load.py's summary out of the report
+        load.run(db_path=out_db, raw_dir=raw_dir)
     return sqlite3.connect(f"file:{out_db.as_posix()}?mode=ro", uri=True)
 
 

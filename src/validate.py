@@ -8,6 +8,7 @@ Each check prints PASS, WARN or STOP with a short detail. The exit code is non-z
 STOP check fails. WARNs never stop the pipeline but are printed on every run.
 """
 
+import os
 import shutil
 import statistics
 import sys
@@ -179,6 +180,8 @@ def check_volume(con):
     """Rows this run added compared with a typical run. Zero, or 10x the usual, is a WARN.
     (A --skip-ingest rebuild fetches nothing, so it legitimately shows zero.)"""
     name = "aircraft states retrieved this run are in line with a typical run"
+    if os.environ.get("PIPELINE_INGEST_SKIPPED") == "1":
+        return "PASS", name, "ingestion skipped (--skip-ingest rebuild): nothing was retrieved to compare"
     run_time = RUN_TIME or resolve_run_time(None)
     window_start = run_time - timedelta(minutes=VOLUME_WINDOW_MINUTES)
     this_run, earlier = 0, []

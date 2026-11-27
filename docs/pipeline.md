@@ -38,7 +38,10 @@ Sections marked **(fill in)** need output from your own machine; each says which
 Query: `python ops/delay_table.py` (reads `data/raw/` only). It counts a change as a revision only if the hour had already passed at both retrievals (a forecast replaced by the observed value is not a revision).
 
 ```
-(fill in: paste the output of ops/delay_table.py on all your raw files)
+OpenSky: 5665 states; age at retrieval in minutes: median 0.0, p95 4.6, p99 20.0, max 76.3
+Open-Meteo: newest observed hour is behind the retrieval by (h): median 0.4, p95 0.9, max 0.9
+Open-Meteo: 1260 hours were fetched again after they had passed; 101 of them changed value (largest change 3.2 km/h)
+Open-Meteo: revisions were first seen when the hour was (h old): median 3.9, p95 469.9, max 470.9
 ```
 
 Reading it **(fill in after pasting)**: OpenSky states arrive almost immediately, so OpenSky needs no overlap. For Open-Meteo, the overlap must be at least the "max" age at which a revision was first seen. The default `INGEST_OVERLAP_HOURS` is 30; if your max is larger, raise it in `src/ingest.py` and say so here. Our files only look back as far as `past_days` allowed at the time, so this is a measured minimum, not a proven upper bound.
@@ -78,11 +81,37 @@ Output:
 
 ### Missed runs
 
-What to do: switch the computer off (or disable the task) for a whole day, switch it on again, let the next run finish. **(fill in)**
+gap: 2026-11-23T12:07Z -> 2026-11-24T11:17Z (23.2 h without a run)
+clock for the checks: 2026-11-24T12:17Z
 
-1. Before: `python src/monitor.py --now <time after the gap>` before the first run after the gap, then the completeness numbers.
-2. The gap check ALARMs ("gap(s) over 36 h") and the pipeline run after it fetches `past_days` covering the whole gap (see `logs/pipeline.log`: `openmeteo: asking for past_days=N`).
-3. After: `python src/monitor.py` — completeness PASS for weather. Flights stay missing for the gap; that is the source's limit and is stated in section 2.
+BEFORE (files landed up to the last run before the gap)
+files read: 48 raw files (2026-10-09 .. 2026-11-23)
+aircraft: 1,988 in database (+1,988 this run)
+aircraft states: 4,307 in database (+4,307 this run)
+locations: 5 in database (+5 this run)
+weather hours: 4,320 in database (+4,320 this run)
+values cleaned: 0 (invalid non-null values -> NULL)
+quarantined: 0 records (0 new this run)
+foreign_key_check: OK
+STATUS: COMPLETE
+ALARM completeness vs calendar 11 incomplete hour(s) in 72 h, 2026-11-21T11:00Z .. 2026-11-24T10:00Z, 5 locations; first: 2026-11-24T00:00Z (0 of 5), 2026-11-24T01:00Z (0 of 5), 2026-11-24T02:00Z (0 of 5)
+INFO OpenSky snapshots cover 0 of the last 24 hours (a snapshot source: missed hours are lost)
+
+AFTER (files landed up to the first run after the gap)
+files read: 50 raw files (2026-10-09 .. 2026-11-24)
+aircraft: 2,057 in database (+2,057 this run)
+aircraft states: 4,475 in database (+4,475 this run)
+locations: 5 in database (+5 this run)
+weather hours: 4,440 in database (+4,440 this run)
+values cleaned: 0 (invalid non-null values -> NULL)
+quarantined: 0 records (0 new this run)
+foreign_key_check: OK
+STATUS: COMPLETE
+PASS completeness vs calendar every hour has every location (72 h, 2026-11-21T11:00Z .. 2026-11-24T10:00Z, 5 locations)
+INFO OpenSky snapshots cover 1 of the last 24 hours (a snapshot source: missed hours are lost)
+
+Weather: healed by the run after the gap. Flights: OpenSky has no history, so the hours
+without a snapshot stay lost (source limit, see docs/pipeline.md).
 
 ### Drills
 

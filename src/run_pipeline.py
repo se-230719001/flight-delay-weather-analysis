@@ -135,7 +135,7 @@ def as_text(value):
     return value.decode("utf-8", "replace") if isinstance(value, bytes) else value
 
 
-def run_step(step, timeout, run_time_text):
+def run_step(step, timeout, run_time_text, skip_ingest=False):
     """Run one step as its own process. Returns (exit_code, output)."""
     cmd = [sys.executable, step, "--run-time", run_time_text]
     if DRILL_HANG_STEP == step:
@@ -143,6 +143,8 @@ def run_step(step, timeout, run_time_text):
     if TIMEOUT_OVERRIDE:
         timeout = float(TIMEOUT_OVERRIDE)
     env = dict(os.environ, PYTHONIOENCODING="utf-8")   # Windows consoles are not UTF-8
+    if skip_ingest:
+        env["PIPELINE_INGEST_SKIPPED"] = "1"   # validate.py: a rebuild fetches nothing, so no volume WARN
     try:
         proc = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True,
                               encoding="utf-8", errors="replace", timeout=timeout)
@@ -176,7 +178,7 @@ def main(argv=None):
         for step, timeout in steps:
             print(f"--- {step} ---", flush=True)
             started_at = wall_clock()
-            code, output = run_step(step, timeout, run_time_text)
+            code, output = run_step(step, timeout, run_time_text, args.skip_ingest)
             finished_at = wall_clock()
             log_step(run_id, run_time_text, step, started_at, finished_at, code,
                      summarize(output, code))
